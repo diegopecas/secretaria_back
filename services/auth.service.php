@@ -196,9 +196,7 @@ class AuthService
         while ($row = $sentence->fetch(PDO::FETCH_ASSOC)) {
             $roles[] = $row['nombre'];
         }
-        
-        // Debug
-        error_log("Roles para usuario $userId: " . json_encode($roles));
+
         
         return $roles;
     }
@@ -224,9 +222,6 @@ class AuthService
         while ($row = $sentence->fetch(PDO::FETCH_ASSOC)) {
             $permisos[] = $row['nombre'];
         }
-        
-        // Debug
-        error_log("Permisos para usuario $userId: " . json_encode($permisos));
         
         return $permisos;
     }

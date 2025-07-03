@@ -16,23 +16,32 @@ define('REFRESH_TOKEN_EXPIRATION', 604800); // 7 días para refresh token
 // Configurar zona horaria
 date_default_timezone_set('America/Bogota');
 
-// Configurar Flight
-Flight::register('db', 'PDO', array('mysql:host='.DB_HOST.';dbname='.DB_NAME.';charset=utf8mb4', DB_USER, DB_PASS), 
-    function($db){
-        $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    }
+// Registrar la base de datos con opciones PDO mejoradas
+$options = [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4",
+    PDO::ATTR_STRINGIFY_FETCHES => false,
+    PDO::ATTR_EMULATE_PREPARES => false
+];
+
+Flight::register('db', 'PDO', 
+    array('mysql:host='.DB_HOST.';dbname='.DB_NAME.';charset=utf8mb4', DB_USER, DB_PASS, $options)
 );
 
-// Configurar CORS
-Flight::before('start', function(&$params, &$output){
+// Configurar CORS - Como before hook para que se aplique antes
+Flight::before('start', function(&$params, &$output) {
+    // Configurar headers CORS
     header('Access-Control-Allow-Origin: *');
-    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-    header('Access-Control-Allow-Headers: Content-Type, Authorization');
-    header('Content-Type: application/json; charset=UTF-8');
+    header("Access-Control-Allow-Headers: X-API-KEY, Origin, X-Requested-With, Content-Type, Accept, Access-Control-Request-Method, Authorization");
+    header("Access-Control-Allow-Methods: GET, POST, OPTIONS, PUT, DELETE, PATCH");
+    header("Allow: GET, POST, OPTIONS, PUT, DELETE, PATCH");
     
+    // Si es OPTIONS, responder inmediatamente
     if (Flight::request()->method == 'OPTIONS') {
-        Flight::halt(200);
+        Flight::response()->status(200);
+        Flight::response()->send();
+        exit;
     }
 });
 
@@ -113,15 +122,13 @@ function requireAuth() {
     $token = isset($headers['Authorization']) ? str_replace('Bearer ', '', $headers['Authorization']) : null;
     
     if (!$token) {
-        Flight::json(['error' => 'Token no proporcionado'], 401);
-        Flight::stop();
+        responderJSON(['error' => 'Token no proporcionado'], 401);
     }
     
     $user = validateToken($token);
     
     if (!$user) {
-        Flight::json(['error' => 'Token inválido o expirado'], 401);
-        Flight::stop();
+        responderJSON(['error' => 'Token inválido o expirado'], 401);
     }
     
     // Hacer disponible el usuario para las rutas
