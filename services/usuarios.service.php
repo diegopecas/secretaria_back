@@ -5,25 +5,17 @@ class UsuariosService
     public static function obtenerTodos()
     {
         try {
-            // Debug: Log de inicio
-            error_log("UsuariosService::obtenerTodos - Iniciando");
-            
             requireAuth();
             $currentUser = Flight::get('currentUser');
             
-            // Debug: Usuario actual
-            error_log("Usuario actual: " . json_encode($currentUser));
-            
             // Verificar permisos
             if (!AuthService::checkPermission($currentUser['id'], 'usuarios.ver')) {
-                error_log("Usuario sin permisos para ver usuarios");
                 Flight::json(array('error' => 'No tiene permisos para ver usuarios'), 403);
                 return;
             }
             
             $db = Flight::db();
             
-            // Query simplificada para debug
             $sentence = $db->prepare("
                 SELECT 
                     u.id,
@@ -36,11 +28,8 @@ class UsuariosService
                 ORDER BY u.nombre ASC
             ");
             
-            error_log("Ejecutando query de usuarios");
             $sentence->execute();
             $usuarios = $sentence->fetchAll(PDO::FETCH_ASSOC);
-            
-            error_log("Usuarios encontrados: " . count($usuarios));
             
             // Agregar roles a cada usuario
             foreach ($usuarios as &$usuario) {
@@ -52,7 +41,6 @@ class UsuariosService
                 $usuario['ultimo_acceso'] = self::obtenerUltimoAcceso($usuario['id']);
             }
             
-            error_log("Retornando usuarios con roles");
             Flight::json($usuarios);
             
         } catch (Exception $e) {
@@ -89,9 +77,6 @@ class UsuariosService
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
-            // El ID viene como parámetro de la ruta, no del body
-            error_log("Obteniendo usuario con ID: " . $id);
             
             // Verificar permisos
             if (!AuthService::checkPermission($currentUser['id'], 'usuarios.ver')) {
@@ -148,10 +133,7 @@ class UsuariosService
             }
             
             // Obtener datos del request
-            $rawData = file_get_contents('php://input');
-            $data = json_decode($rawData, true);
-            
-            error_log("Datos recibidos para crear usuario: " . json_encode($data));
+            $data = Flight::request()->data->getData();
             
             $nombre = $data['nombre'] ?? null;
             $email = $data['email'] ?? null;
@@ -182,34 +164,48 @@ class UsuariosService
             
             $db->beginTransaction();
             
-            // Insertar usuario
-            $sentence = $db->prepare("
-                INSERT INTO usuarios (nombre, email, password, activo) 
-                VALUES (:nombre, :email, :password, :activo)
-            ");
-            $sentence->bindParam(':nombre', $nombre);
-            $sentence->bindParam(':email', $email);
-            $sentence->bindParam(':password', $hashedPassword);
-            $sentence->bindParam(':activo', $activo, PDO::PARAM_BOOL);
-            $sentence->execute();
-            
-            $userId = $db->lastInsertId();
-            
-            // Asignar roles
-            self::asignarRolesUsuario($userId, $roles);
-            
-            $db->commit();
-            
-            Flight::json(array(
-                'success' => true,
-                'id' => $userId,
-                'message' => 'Usuario creado correctamente'
-            ));
+            try {
+                // Insertar usuario
+                $sentence = $db->prepare("
+                    INSERT INTO usuarios (nombre, email, password, activo) 
+                    VALUES (:nombre, :email, :password, :activo)
+                ");
+                $sentence->bindParam(':nombre', $nombre);
+                $sentence->bindParam(':email', $email);
+                $sentence->bindParam(':password', $hashedPassword);
+                $sentence->bindParam(':activo', $activo, PDO::PARAM_BOOL);
+                $sentence->execute();
+                
+                $userId = $db->lastInsertId();
+                
+                // Asignar roles
+                self::asignarRolesUsuario($userId, $roles);
+                
+                // AUDITORÍA - Registrar creación
+                $datosNuevos = [
+                    'id' => $userId,
+                    'nombre' => $nombre,
+                    'email' => $email,
+                    'activo' => $activo,
+                    'roles' => $roles
+                ];
+                
+                AuditService::registrar('usuarios', $userId, 'CREATE', null, $datosNuevos);
+                
+                $db->commit();
+                
+                Flight::json(array(
+                    'success' => true,
+                    'id' => $userId,
+                    'message' => 'Usuario creado correctamente'
+                ));
+                
+            } catch (Exception $e) {
+                $db->rollBack();
+                throw $e;
+            }
             
         } catch (Exception $e) {
-            if (isset($db)) {
-                $db->rollBack();
-            }
             error_log("Error al crear usuario: " . $e->getMessage());
             Flight::json(array('error' => 'Error al crear usuario: ' . $e->getMessage()), 500);
         }
@@ -229,10 +225,7 @@ class UsuariosService
             }
             
             // Obtener datos del request
-            $rawData = file_get_contents('php://input');
-            $data = json_decode($rawData, true);
-            
-            error_log("Datos para actualizar: " . json_encode($data));
+            $data = Flight::request()->data->getData();
             
             $id = $data['id'] ?? null;
             
@@ -242,72 +235,102 @@ class UsuariosService
             }
             
             $db = Flight::db();
+            
+            // AUDITORÍA - Obtener datos anteriores
+            $stmtAnterior = $db->prepare("SELECT * FROM usuarios WHERE id = :id");
+            $stmtAnterior->bindParam(':id', $id);
+            $stmtAnterior->execute();
+            $datosAnteriores = $stmtAnterior->fetch();
+            
+            if (!$datosAnteriores) {
+                Flight::json(array('error' => 'Usuario no encontrado'), 404);
+                return;
+            }
+            
+            // Agregar roles actuales a datos anteriores
+            $datosAnteriores['roles'] = self::obtenerRolesUsuario($id);
+            
             $db->beginTransaction();
             
-            // Construir query dinámicamente
-            $updates = [];
-            $params = [':id' => $id];
-            
-            if (isset($data['nombre'])) {
-                $updates[] = "nombre = :nombre";
-                $params[':nombre'] = $data['nombre'];
-            }
-            
-            if (isset($data['email'])) {
-                // Verificar que el email no esté en uso por otro usuario
-                $checkSentence = $db->prepare("SELECT id FROM usuarios WHERE email = :email AND id != :id");
-                $checkSentence->bindParam(':email', $data['email']);
-                $checkSentence->bindParam(':id', $id);
-                $checkSentence->execute();
+            try {
+                // Construir query dinámicamente
+                $updates = [];
+                $params = [':id' => $id];
                 
-                if ($checkSentence->fetch()) {
-                    $db->rollBack();
-                    Flight::json(array('error' => 'El email ya está en uso'), 400);
-                    return;
+                if (isset($data['nombre'])) {
+                    $updates[] = "nombre = :nombre";
+                    $params[':nombre'] = $data['nombre'];
                 }
                 
-                $updates[] = "email = :email";
-                $params[':email'] = $data['email'];
-            }
-            
-            if (isset($data['password']) && !empty($data['password'])) {
-                $updates[] = "password = :password";
-                $params[':password'] = password_hash($data['password'], PASSWORD_DEFAULT);
-            }
-            
-            if (isset($data['activo'])) {
-                $updates[] = "activo = :activo";
-                $params[':activo'] = (bool)$data['activo'];
-            }
-            
-            if (!empty($updates)) {
-                $sql = "UPDATE usuarios SET " . implode(", ", $updates) . ", fecha_actualizacion = NOW() WHERE id = :id";
-                $sentence = $db->prepare($sql);
-                
-                foreach ($params as $key => $value) {
-                    $sentence->bindValue($key, $value);
+                if (isset($data['email'])) {
+                    // Verificar que el email no esté en uso por otro usuario
+                    $checkSentence = $db->prepare("SELECT id FROM usuarios WHERE email = :email AND id != :id");
+                    $checkSentence->bindParam(':email', $data['email']);
+                    $checkSentence->bindParam(':id', $id);
+                    $checkSentence->execute();
+                    
+                    if ($checkSentence->fetch()) {
+                        $db->rollBack();
+                        Flight::json(array('error' => 'El email ya está en uso'), 400);
+                        return;
+                    }
+                    
+                    $updates[] = "email = :email";
+                    $params[':email'] = $data['email'];
                 }
                 
-                $sentence->execute();
+                if (isset($data['password']) && !empty($data['password'])) {
+                    $updates[] = "password = :password";
+                    $params[':password'] = password_hash($data['password'], PASSWORD_DEFAULT);
+                }
+                
+                if (isset($data['activo'])) {
+                    $updates[] = "activo = :activo";
+                    $params[':activo'] = (bool)$data['activo'];
+                }
+                
+                if (!empty($updates)) {
+                    $sql = "UPDATE usuarios SET " . implode(", ", $updates) . ", fecha_actualizacion = NOW() WHERE id = :id";
+                    $sentence = $db->prepare($sql);
+                    
+                    foreach ($params as $key => $value) {
+                        $sentence->bindValue($key, $value);
+                    }
+                    
+                    $sentence->execute();
+                }
+                
+                // Actualizar roles si se proporcionaron
+                if (isset($data['roles']) && is_array($data['roles'])) {
+                    self::asignarRolesUsuario($id, $data['roles']);
+                }
+                
+                // AUDITORÍA - Obtener datos nuevos
+                $stmtNuevo = $db->prepare("SELECT * FROM usuarios WHERE id = :id");
+                $stmtNuevo->bindParam(':id', $id);
+                $stmtNuevo->execute();
+                $datosNuevos = $stmtNuevo->fetch();
+                
+                // Agregar roles nuevos
+                $datosNuevos['roles'] = isset($data['roles']) ? $data['roles'] : $datosAnteriores['roles'];
+                
+                // Registrar auditoría
+                AuditService::registrar('usuarios', $id, 'UPDATE', $datosAnteriores, $datosNuevos);
+                
+                $db->commit();
+                
+                Flight::json(array(
+                    'success' => true,
+                    'id' => $id,
+                    'message' => 'Usuario actualizado correctamente'
+                ));
+                
+            } catch (Exception $e) {
+                $db->rollBack();
+                throw $e;
             }
-            
-            // Actualizar roles si se proporcionaron
-            if (isset($data['roles']) && is_array($data['roles'])) {
-                self::asignarRolesUsuario($id, $data['roles']);
-            }
-            
-            $db->commit();
-            
-            Flight::json(array(
-                'success' => true,
-                'id' => $id,
-                'message' => 'Usuario actualizado correctamente'
-            ));
             
         } catch (Exception $e) {
-            if (isset($db)) {
-                $db->rollBack();
-            }
             error_log("Error al actualizar usuario: " . $e->getMessage());
             Flight::json(array('error' => 'Error al actualizar usuario: ' . $e->getMessage()), 500);
         }
@@ -327,12 +350,9 @@ class UsuariosService
             }
             
             // Obtener datos del request
-            $rawData = file_get_contents('php://input');
-            $data = json_decode($rawData, true);
+            $data = Flight::request()->data->getData();
             
             $id = $data['id'] ?? null;
-            
-            error_log("Intentando eliminar usuario ID: " . $id);
             
             if (!$id) {
                 Flight::json(array('error' => 'ID no proporcionado'), 400);
@@ -347,6 +367,20 @@ class UsuariosService
             
             $db = Flight::db();
             
+            // AUDITORÍA - Obtener datos antes de eliminar
+            $stmtAnterior = $db->prepare("SELECT * FROM usuarios WHERE id = :id");
+            $stmtAnterior->bindParam(':id', $id);
+            $stmtAnterior->execute();
+            $datosAnteriores = $stmtAnterior->fetch();
+            
+            if (!$datosAnteriores) {
+                Flight::json(array('error' => 'Usuario no encontrado'), 404);
+                return;
+            }
+            
+            // Agregar roles a datos anteriores
+            $datosAnteriores['roles'] = self::obtenerRolesUsuario($id);
+            
             // En lugar de eliminar físicamente, desactivar el usuario
             $sentence = $db->prepare("UPDATE usuarios SET activo = 0 WHERE id = :id");
             $sentence->bindParam(':id', $id);
@@ -356,6 +390,9 @@ class UsuariosService
             $deleteSessions = $db->prepare("DELETE FROM sesiones WHERE usuario_id = :id");
             $deleteSessions->bindParam(':id', $id);
             $deleteSessions->execute();
+            
+            // AUDITORÍA - Registrar eliminación
+            AuditService::registrar('usuarios', $id, 'DELETE', $datosAnteriores, null);
             
             Flight::json(array(
                 'success' => true,
@@ -383,10 +420,7 @@ class UsuariosService
             }
             
             // Obtener datos del request
-            $rawData = file_get_contents('php://input');
-            $data = json_decode($rawData, true);
-            
-            error_log("Cambiar estado - datos recibidos: " . json_encode($data));
+            $data = Flight::request()->data->getData();
             
             $id = $data['id'] ?? null;
             $activo = isset($data['activo']) ? (bool)$data['activo'] : null;
@@ -397,6 +431,17 @@ class UsuariosService
             }
             
             $db = Flight::db();
+            
+            // AUDITORÍA - Obtener estado anterior
+            $stmtAnterior = $db->prepare("SELECT id, nombre, email, activo FROM usuarios WHERE id = :id");
+            $stmtAnterior->bindParam(':id', $id);
+            $stmtAnterior->execute();
+            $datosAnteriores = $stmtAnterior->fetch();
+            
+            if (!$datosAnteriores) {
+                Flight::json(array('error' => 'Usuario no encontrado'), 404);
+                return;
+            }
             
             $sentence = $db->prepare("UPDATE usuarios SET activo = :activo WHERE id = :id");
             $sentence->bindParam(':id', $id);
@@ -409,6 +454,13 @@ class UsuariosService
                 $deleteSessions->bindParam(':id', $id);
                 $deleteSessions->execute();
             }
+            
+            // AUDITORÍA - Preparar datos nuevos
+            $datosNuevos = $datosAnteriores;
+            $datosNuevos['activo'] = $activo;
+            
+            // Registrar auditoría
+            AuditService::registrar('usuarios', $id, 'UPDATE', $datosAnteriores, $datosNuevos);
             
             Flight::json(array(
                 'success' => true,
@@ -435,8 +487,7 @@ class UsuariosService
             }
             
             // Obtener datos del request
-            $rawData = file_get_contents('php://input');
-            $data = json_decode($rawData, true);
+            $data = Flight::request()->data->getData();
             
             $id = $data['id'] ?? null;
             $roles = $data['roles'] ?? [];
@@ -446,7 +497,19 @@ class UsuariosService
                 return;
             }
             
+            $db = Flight::db();
+            
+            // AUDITORÍA - Obtener roles anteriores
+            $rolesAnteriores = self::obtenerRolesUsuario($id);
+            
+            // Asignar nuevos roles
             self::asignarRolesUsuario($id, $roles);
+            
+            // AUDITORÍA - Registrar cambio de roles
+            $datosAnteriores = ['id' => $id, 'roles' => $rolesAnteriores];
+            $datosNuevos = ['id' => $id, 'roles' => $roles];
+            
+            AuditService::registrar('usuarios', $id, 'UPDATE', $datosAnteriores, $datosNuevos);
             
             Flight::json(array(
                 'success' => true,

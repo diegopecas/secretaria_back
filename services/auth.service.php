@@ -6,11 +6,10 @@ class AuthService
         $db = Flight::db();
         
         // Obtener datos del request
-        $rawData = file_get_contents('php://input');
-        $jsonData = json_decode($rawData, true);
+        $data = Flight::request()->data->getData();
         
-        $email = Flight::request()->data['email'] ?? $jsonData['email'] ?? null;
-        $password = Flight::request()->data['password'] ?? $jsonData['password'] ?? null;
+        $email = $data['email'] ?? null;
+        $password = $data['password'] ?? null;
         
         // Buscar usuario
         $sentence = $db->prepare("SELECT id, nombre, email, password FROM usuarios WHERE email = :email AND activo = 1");
@@ -55,6 +54,19 @@ class AuthService
             $insertSentence->bindParam(':ip', $deviceInfo['ip']);
             $insertSentence->execute();
             
+            $sesionId = $db->lastInsertId();
+            
+            // AUDITORÍA - Registrar inicio de sesión
+            $datosAuditoria = [
+                'usuario_id' => $user['id'],
+                'email' => $user['email'],
+                'dispositivo' => $deviceInfo['device'],
+                'ip' => $deviceInfo['ip'],
+                'accion' => 'LOGIN_SUCCESS'
+            ];
+            
+            AuditService::registrar('sesiones', $sesionId, 'CREATE', null, $datosAuditoria, $user);
+            
             // Obtener roles del usuario
             $roles = self::getUserRoles($user['id']);
             
@@ -76,6 +88,17 @@ class AuthService
                 )
             ));
         } else {
+            // AUDITORÍA - Registrar intento fallido de login
+            $datosAuditoria = [
+                'email_intento' => $email,
+                'ip' => $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0',
+                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown',
+                'accion' => 'LOGIN_FAILED'
+            ];
+            
+            // Para intentos fallidos, usamos usuario_id = 0
+            AuditService::registrar('intentos_login', 0, 'CREATE', null, $datosAuditoria);
+            
             Flight::json(array('error' => 'Credenciales incorrectas'), 401);
         }
     }
@@ -87,9 +110,40 @@ class AuthService
         
         if ($token) {
             $db = Flight::db();
-            $sentence = $db->prepare("DELETE FROM sesiones WHERE token = :token");
-            $sentence->bindParam(':token', $token);
-            $sentence->execute();
+            
+            // Obtener información de la sesión antes de eliminarla
+            $selectSentence = $db->prepare("
+                SELECT s.*, u.nombre, u.email 
+                FROM sesiones s 
+                INNER JOIN usuarios u ON s.usuario_id = u.id
+                WHERE s.token = :token
+            ");
+            $selectSentence->bindParam(':token', $token);
+            $selectSentence->execute();
+            $sesion = $selectSentence->fetch();
+            
+            if ($sesion) {
+                // Eliminar la sesión
+                $sentence = $db->prepare("DELETE FROM sesiones WHERE token = :token");
+                $sentence->bindParam(':token', $token);
+                $sentence->execute();
+                
+                // AUDITORÍA - Registrar cierre de sesión
+                $datosAuditoria = [
+                    'usuario_id' => $sesion['usuario_id'],
+                    'email' => $sesion['email'],
+                    'dispositivo' => $sesion['dispositivo'],
+                    'ip' => $sesion['ip_address'],
+                    'accion' => 'LOGOUT'
+                ];
+                
+                $usuario = [
+                    'id' => $sesion['usuario_id'],
+                    'nombre' => $sesion['nombre']
+                ];
+                
+                AuditService::registrar('sesiones', $sesion['id'], 'DELETE', $datosAuditoria, null, $usuario);
+            }
         }
         
         Flight::json(array('success' => true, 'message' => 'Sesión cerrada correctamente'));
@@ -120,12 +174,11 @@ class AuthService
         $db = Flight::db();
         
         // Obtener datos del request
-        $rawData = file_get_contents('php://input');
-        $jsonData = json_decode($rawData, true);
+        $data = Flight::request()->data->getData();
         
-        $nombre = Flight::request()->data['nombre'] ?? $jsonData['nombre'] ?? null;
-        $email = Flight::request()->data['email'] ?? $jsonData['email'] ?? null;
-        $password = Flight::request()->data['password'] ?? $jsonData['password'] ?? null;
+        $nombre = $data['nombre'] ?? null;
+        $email = $data['email'] ?? null;
+        $password = $data['password'] ?? null;
         
         // Validar que el email no exista
         $checkSentence = $db->prepare("SELECT id FROM usuarios WHERE email = :email");
@@ -161,6 +214,23 @@ class AuthService
             $rolSentence->bindParam(':usuario_id', $userId);
             $rolSentence->execute();
             
+            // AUDITORÍA - Registrar registro de usuario
+            $datosNuevos = [
+                'id' => $userId,
+                'nombre' => $nombre,
+                'email' => $email,
+                'roles' => ['usuario'],
+                'origen' => 'SELF_REGISTER'
+            ];
+            
+            // En el registro, el usuario se crea a sí mismo
+            $usuario = [
+                'id' => $userId,
+                'nombre' => $nombre
+            ];
+            
+            AuditService::registrar('usuarios', $userId, 'CREATE', null, $datosNuevos, $usuario);
+            
             $db->commit();
             
             Flight::json(array(
@@ -175,6 +245,16 @@ class AuthService
             ));
         } catch (Exception $e) {
             $db->rollBack();
+            
+            // AUDITORÍA - Registrar fallo en registro
+            $datosAuditoria = [
+                'email_intento' => $email,
+                'error' => $e->getMessage(),
+                'accion' => 'REGISTER_FAILED'
+            ];
+            
+            AuditService::registrar('intentos_registro', 0, 'CREATE', null, $datosAuditoria);
+            
             Flight::json(array('error' => 'Error al registrar usuario'), 500);
         }
     }
@@ -196,7 +276,6 @@ class AuthService
         while ($row = $sentence->fetch(PDO::FETCH_ASSOC)) {
             $roles[] = $row['nombre'];
         }
-
         
         return $roles;
     }
@@ -232,8 +311,14 @@ class AuthService
         $db = Flight::db();
         $sentence = $db->prepare("
             SELECT COUNT(*) as tiene_permiso
-            FROM v_usuarios_permisos
-            WHERE usuario_id = :usuario_id AND permiso_nombre = :permiso
+            FROM permisos p
+            INNER JOIN roles_permisos rp ON p.id = rp.permiso_id
+            INNER JOIN roles r ON rp.rol_id = r.id
+            INNER JOIN usuarios_roles ur ON r.id = ur.rol_id
+            WHERE ur.usuario_id = :usuario_id 
+            AND p.nombre = :permiso
+            AND p.activo = 1 
+            AND r.activo = 1
         ");
         $sentence->bindParam(':usuario_id', $userId);
         $sentence->bindParam(':permiso', $permiso);
@@ -249,10 +334,9 @@ class AuthService
         $db = Flight::db();
         
         // Obtener refresh token del request
-        $rawData = file_get_contents('php://input');
-        $jsonData = json_decode($rawData, true);
+        $data = Flight::request()->data->getData();
         
-        $refreshToken = Flight::request()->data['refresh_token'] ?? $jsonData['refresh_token'] ?? null;
+        $refreshToken = $data['refresh_token'] ?? null;
         
         if (!$refreshToken) {
             Flight::json(array('error' => 'Refresh token no proporcionado'), 400);
@@ -263,6 +347,15 @@ class AuthService
         $session = validateRefreshToken($refreshToken);
         
         if (!$session) {
+            // AUDITORÍA - Intento de renovación con token inválido
+            $datosAuditoria = [
+                'refresh_token' => substr($refreshToken, 0, 10) . '...', // Solo primeros caracteres por seguridad
+                'ip' => $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0',
+                'accion' => 'REFRESH_TOKEN_FAILED'
+            ];
+            
+            AuditService::registrar('intentos_refresh', 0, 'CREATE', null, $datosAuditoria);
+            
             Flight::json(array('error' => 'Refresh token inválido o expirado'), 401);
             return;
         }
@@ -270,6 +363,13 @@ class AuthService
         // Generar nuevos tokens
         $tokens = generateTokenPair($session['user_id']);
         $deviceInfo = getDeviceInfo();
+        
+        // Datos anteriores de la sesión
+        $datosAnteriores = [
+            'token' => substr($session['token'], 0, 10) . '...',
+            'refresh_token' => substr($session['refresh_token'], 0, 10) . '...',
+            'fecha_expiracion' => $session['fecha_expiracion']
+        ];
         
         // Actualizar sesión con nuevos tokens
         $updateSentence = $db->prepare("
@@ -289,6 +389,22 @@ class AuthService
         $updateSentence->bindParam(':ip', $deviceInfo['ip']);
         $updateSentence->bindParam(':sesion_id', $session['id']);
         $updateSentence->execute();
+        
+        // Datos nuevos de la sesión
+        $datosNuevos = [
+            'token' => substr($tokens['access_token'], 0, 10) . '...',
+            'refresh_token' => substr($tokens['refresh_token'], 0, 10) . '...',
+            'ip' => $deviceInfo['ip'],
+            'accion' => 'TOKEN_REFRESHED'
+        ];
+        
+        // AUDITORÍA - Registrar renovación de token
+        $usuario = [
+            'id' => $session['user_id'],
+            'nombre' => $session['nombre']
+        ];
+        
+        AuditService::registrar('sesiones', $session['id'], 'UPDATE', $datosAnteriores, $datosNuevos, $usuario);
         
         // Obtener roles y permisos actualizados
         $roles = self::getUserRoles($session['user_id']);
@@ -356,6 +472,20 @@ class AuthService
         $currentToken = str_replace('Bearer ', '', $headers['Authorization']);
         
         $db = Flight::db();
+        
+        // Obtener las sesiones que se van a eliminar para auditoría
+        $selectSentence = $db->prepare("
+            SELECT id, dispositivo, ip_address 
+            FROM sesiones 
+            WHERE usuario_id = :usuario_id 
+            AND token != :current_token
+        ");
+        $selectSentence->bindParam(':usuario_id', $currentUser['id']);
+        $selectSentence->bindParam(':current_token', $currentToken);
+        $selectSentence->execute();
+        $sesionesEliminadas = $selectSentence->fetchAll();
+        
+        // Eliminar las sesiones
         $sentence = $db->prepare("
             DELETE FROM sesiones 
             WHERE usuario_id = :usuario_id 
@@ -364,6 +494,18 @@ class AuthService
         $sentence->bindParam(':usuario_id', $currentUser['id']);
         $sentence->bindParam(':current_token', $currentToken);
         $sentence->execute();
+        
+        // AUDITORÍA - Registrar cierre masivo de sesiones
+        if (count($sesionesEliminadas) > 0) {
+            $datosAuditoria = [
+                'usuario_id' => $currentUser['id'],
+                'sesiones_cerradas' => count($sesionesEliminadas),
+                'dispositivos' => array_column($sesionesEliminadas, 'dispositivo'),
+                'accion' => 'LOGOUT_ALL_SESSIONS'
+            ];
+            
+            AuditService::registrar('sesiones', 0, 'DELETE', $datosAuditoria, null);
+        }
         
         Flight::json(array(
             'success' => true,

@@ -86,9 +86,13 @@ Flight::map('json', function($data, $code = 200, $encode = true) {
 
 require 'config.php';
 
-// Cargar servicios
-require 'services/auth.service.php';
-require 'services/usuarios.service.php';
+// Cargar servicios automáticamente
+// IMPORTANTE: Ordenar para que audit.service.php se cargue primero
+$services = glob(__DIR__ . '/services/*.service.php');
+sort($services); // Esto asegura que audit.service.php se cargue antes que auth.service.php
+foreach ($services as $serviceFile) {
+    require_once $serviceFile;
+}
 
 // Configurar Flight
 Flight::set('flight.base_url', '/');
