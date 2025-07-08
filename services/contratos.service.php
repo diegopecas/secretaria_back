@@ -159,13 +159,13 @@ class ContratosService
                 SELECT 
                     id,
                     mes,
-                    año,
+                    anio,
                     valor,
                     porcentaje_avance_fisico,
                     porcentaje_avance_financiero
                 FROM valores_mensuales
                 WHERE contrato_id = :contrato_id
-                ORDER BY año DESC, mes DESC
+                ORDER BY anio DESC, mes DESC
             ");
             $stmtValores->bindParam(':contrato_id', $id);
             $stmtValores->execute();
@@ -230,6 +230,11 @@ class ContratosService
             $db->beginTransaction();
             
             try {
+                // Variables para bindParam
+                $dependencia = $data['dependencia'] ?? null;
+                $unidad_operativa = $data['unidad_operativa'] ?? null;
+                $estado = $data['estado'] ?? 'activo';
+                
                 // Insertar contrato
                 $sentence = $db->prepare("
                     INSERT INTO contratos (
@@ -270,9 +275,9 @@ class ContratosService
                 $sentence->bindParam(':plazo_dias', $plazo_dias);
                 $sentence->bindParam(':objeto_contrato', $objeto_contrato);
                 $sentence->bindParam(':valor_total', $valor_total);
-                $sentence->bindParam(':dependencia', $data['dependencia'] ?? null);
-                $sentence->bindParam(':unidad_operativa', $data['unidad_operativa'] ?? null);
-                $sentence->bindParam(':estado', $data['estado'] ?? 'activo');
+                $sentence->bindParam(':dependencia', $dependencia);
+                $sentence->bindParam(':unidad_operativa', $unidad_operativa);
+                $sentence->bindParam(':estado', $estado);
                 
                 $sentence->execute();
                 $contratoId = $db->lastInsertId();
@@ -296,10 +301,13 @@ class ContratosService
                             )
                         ");
                         
+                        $cargo = $supervisor['cargo'] ?? null;
+                        $tipo = $supervisor['tipo'] ?? 'principal';
+                        
                         $stmtSupervisor->bindParam(':contrato_id', $contratoId);
                         $stmtSupervisor->bindParam(':nombre', $supervisor['nombre']);
-                        $stmtSupervisor->bindParam(':cargo', $supervisor['cargo'] ?? null);
-                        $stmtSupervisor->bindParam(':tipo', $supervisor['tipo'] ?? 'principal');
+                        $stmtSupervisor->bindParam(':cargo', $cargo);
+                        $stmtSupervisor->bindParam(':tipo', $tipo);
                         $stmtSupervisor->bindParam(':fecha_asignacion', $fecha_suscripcion);
                         $stmtSupervisor->execute();
                     }
@@ -335,26 +343,29 @@ class ContratosService
                             INSERT INTO valores_mensuales (
                                 contrato_id,
                                 mes,
-                                año,
+                                anio,
                                 valor,
                                 porcentaje_avance_fisico,
                                 porcentaje_avance_financiero
                             ) VALUES (
                                 :contrato_id,
                                 :mes,
-                                :año,
+                                :anio,
                                 :valor,
                                 :porcentaje_avance_fisico,
                                 :porcentaje_avance_financiero
                             )
                         ");
                         
+                        $porcentaje_fisico = $valorMensual['porcentaje_avance_fisico'] ?? null;
+                        $porcentaje_financiero = $valorMensual['porcentaje_avance_financiero'] ?? null;
+                        
                         $stmtValor->bindParam(':contrato_id', $contratoId);
                         $stmtValor->bindParam(':mes', $valorMensual['mes']);
-                        $stmtValor->bindParam(':año', $valorMensual['año']);
+                        $stmtValor->bindParam(':anio', $valorMensual['anio']);
                         $stmtValor->bindParam(':valor', $valorMensual['valor']);
-                        $stmtValor->bindParam(':porcentaje_avance_fisico', $valorMensual['porcentaje_avance_fisico'] ?? null);
-                        $stmtValor->bindParam(':porcentaje_avance_financiero', $valorMensual['porcentaje_avance_financiero'] ?? null);
+                        $stmtValor->bindParam(':porcentaje_avance_fisico', $porcentaje_fisico);
+                        $stmtValor->bindParam(':porcentaje_avance_financiero', $porcentaje_financiero);
                         $stmtValor->execute();
                     }
                 }
@@ -654,11 +665,14 @@ class ContratosService
                             WHERE id = :id AND contrato_id = :contrato_id
                         ");
                         
+                        $cargo = $supervisor['cargo'] ?? null;
+                        $tipo = $supervisor['tipo'] ?? 'principal';
+                        
                         $stmtUpdate->bindParam(':id', $supervisor['id']);
                         $stmtUpdate->bindParam(':contrato_id', $contrato_id);
                         $stmtUpdate->bindParam(':nombre', $supervisor['nombre']);
-                        $stmtUpdate->bindParam(':cargo', $supervisor['cargo'] ?? null);
-                        $stmtUpdate->bindParam(':tipo', $supervisor['tipo'] ?? 'principal');
+                        $stmtUpdate->bindParam(':cargo', $cargo);
+                        $stmtUpdate->bindParam(':tipo', $tipo);
                         $stmtUpdate->execute();
                     } else {
                         // Insertar nuevo
@@ -680,10 +694,13 @@ class ContratosService
                             )
                         ");
                         
+                        $cargo = $supervisor['cargo'] ?? null;
+                        $tipo = $supervisor['tipo'] ?? 'principal';
+                        
                         $stmtInsert->bindParam(':contrato_id', $contrato_id);
                         $stmtInsert->bindParam(':nombre', $supervisor['nombre']);
-                        $stmtInsert->bindParam(':cargo', $supervisor['cargo'] ?? null);
-                        $stmtInsert->bindParam(':tipo', $supervisor['tipo'] ?? 'principal');
+                        $stmtInsert->bindParam(':cargo', $cargo);
+                        $stmtInsert->bindParam(':tipo', $tipo);
                         $stmtInsert->execute();
                     }
                 }
@@ -858,16 +875,16 @@ class ContratosService
             
             try {
                 foreach ($valores as $valor) {
-                    // Verificar si ya existe un valor para ese mes/año
+                    // Verificar si ya existe un valor para ese mes/anio
                     $checkExiste = $db->prepare("
                         SELECT id FROM valores_mensuales 
                         WHERE contrato_id = :contrato_id 
                         AND mes = :mes 
-                        AND año = :año
+                        AND anio = :anio
                     ");
                     $checkExiste->bindParam(':contrato_id', $contrato_id);
                     $checkExiste->bindParam(':mes', $valor['mes']);
-                    $checkExiste->bindParam(':año', $valor['año']);
+                    $checkExiste->bindParam(':anio', $valor['anio']);
                     $checkExiste->execute();
                     
                     $existe = $checkExiste->fetch();
@@ -882,10 +899,13 @@ class ContratosService
                             WHERE id = :id
                         ");
                         
+                        $porcentaje_fisico = $valor['porcentaje_avance_fisico'] ?? null;
+                        $porcentaje_financiero = $valor['porcentaje_avance_financiero'] ?? null;
+                        
                         $stmtUpdate->bindParam(':id', $existe['id']);
                         $stmtUpdate->bindParam(':valor', $valor['valor']);
-                        $stmtUpdate->bindParam(':porcentaje_avance_fisico', $valor['porcentaje_avance_fisico'] ?? null);
-                        $stmtUpdate->bindParam(':porcentaje_avance_financiero', $valor['porcentaje_avance_financiero'] ?? null);
+                        $stmtUpdate->bindParam(':porcentaje_avance_fisico', $porcentaje_fisico);
+                        $stmtUpdate->bindParam(':porcentaje_avance_financiero', $porcentaje_financiero);
                         $stmtUpdate->execute();
                     } else {
                         // Insertar
@@ -893,26 +913,29 @@ class ContratosService
                             INSERT INTO valores_mensuales (
                                 contrato_id,
                                 mes,
-                                año,
+                                anio,
                                 valor,
                                 porcentaje_avance_fisico,
                                 porcentaje_avance_financiero
                             ) VALUES (
                                 :contrato_id,
                                 :mes,
-                                :año,
+                                :anio,
                                 :valor,
                                 :porcentaje_avance_fisico,
                                 :porcentaje_avance_financiero
                             )
                         ");
                         
+                        $porcentaje_fisico = $valor['porcentaje_avance_fisico'] ?? null;
+                        $porcentaje_financiero = $valor['porcentaje_avance_financiero'] ?? null;
+                        
                         $stmtInsert->bindParam(':contrato_id', $contrato_id);
                         $stmtInsert->bindParam(':mes', $valor['mes']);
-                        $stmtInsert->bindParam(':año', $valor['año']);
+                        $stmtInsert->bindParam(':anio', $valor['anio']);
                         $stmtInsert->bindParam(':valor', $valor['valor']);
-                        $stmtInsert->bindParam(':porcentaje_avance_fisico', $valor['porcentaje_avance_fisico'] ?? null);
-                        $stmtInsert->bindParam(':porcentaje_avance_financiero', $valor['porcentaje_avance_financiero'] ?? null);
+                        $stmtInsert->bindParam(':porcentaje_avance_fisico', $porcentaje_fisico);
+                        $stmtInsert->bindParam(':porcentaje_avance_financiero', $porcentaje_financiero);
                         $stmtInsert->execute();
                     }
                 }
