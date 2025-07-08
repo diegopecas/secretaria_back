@@ -1,0 +1,15 @@
+# Denegar acceso directo a archivos PHP
+<FilesMatch "\.php$">
+    Order Deny,Allow
+    Deny from all
+</FilesMatch>
+
+# Permitir solo ciertos tipos de archivo
+<FilesMatch "\.(jpg|jpeg|png|gif|pdf|doc|docx|xls|xlsx|txt|odt|ods|odp|ppt|pptx)$">
+    Order Allow,Deny
+    Allow from all
+</FilesMatch>
+
+# Deshabilitar ejecución de scripts
+AddHandler cgi-script .php .pl .py .jsp .asp .sh .cgi
+Options -ExecCGI

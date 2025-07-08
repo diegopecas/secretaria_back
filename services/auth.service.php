@@ -260,7 +260,7 @@ class AuthService
     }
     
     // Obtener roles de un usuario
-    private static function getUserRoles($userId)
+    public static function getUserRoles($userId)
     {
         $db = Flight::db();
         $sentence = $db->prepare("
