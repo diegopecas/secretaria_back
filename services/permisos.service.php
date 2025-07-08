@@ -13,9 +13,9 @@ class PermisosService
                 Flight::json(array('error' => 'No tiene permisos para ver permisos'), 403);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             $sentence = $db->prepare("
                 SELECT 
                     id,
@@ -27,12 +27,11 @@ class PermisosService
                 WHERE activo = 1
                 ORDER BY modulo, nombre
             ");
-            
+
             $sentence->execute();
             $permisos = $sentence->fetchAll(PDO::FETCH_ASSOC);
-            
+
             Flight::json($permisos);
-            
         } catch (Exception $e) {
             error_log("ERROR en obtenerTodos permisos: " . $e->getMessage());
             Flight::json(array('error' => 'Error al obtener permisos'), 500);

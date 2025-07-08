@@ -28,7 +28,7 @@ function responderJSON($data, $code = 200) {
     
     // Usar Flight::json en lugar de manejar la respuesta manualmente
     Flight::json($data, $code);
-    Flight::stop(); // Usar stop() en lugar de exit()
+   
 }
 
 // Middleware para interceptar y convertir datos de entrada JSON
