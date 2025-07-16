@@ -20,6 +20,7 @@ class EntidadesService
                 SELECT 
                     e.id,
                     e.nombre,
+                    e.nombre_corto,
                     e.tipo_identificacion_id,
                     ti.codigo as tipo_identificacion_codigo,
                     ti.nombre as tipo_identificacion_nombre,
@@ -65,6 +66,7 @@ class EntidadesService
                 SELECT 
                     e.id,
                     e.nombre,
+                    e.nombre_corto,
                     e.tipo_identificacion_id,
                     ti.codigo as tipo_identificacion_codigo,
                     ti.nombre as tipo_identificacion_nombre,
@@ -132,6 +134,7 @@ class EntidadesService
             
             // Validaciones
             $nombre = $data['nombre'] ?? null;
+            $nombre_corto = $data['nombre_corto'] ?? null;
             $tipo_identificacion_id = $data['tipo_identificacion_id'] ?? null;
             $identificacion = $data['identificacion'] ?? null;
             $direccion = $data['direccion'] ?? null;
@@ -164,6 +167,7 @@ class EntidadesService
             $sentence = $db->prepare("
                 INSERT INTO entidades (
                     nombre,
+                    nombre_corto,
                     tipo_identificacion_id,
                     identificacion,
                     direccion,
@@ -173,6 +177,7 @@ class EntidadesService
                     activo
                 ) VALUES (
                     :nombre,
+                    :nombre_corto,
                     :tipo_identificacion_id,
                     :identificacion,
                     :direccion,
@@ -184,6 +189,7 @@ class EntidadesService
             ");
             
             $sentence->bindParam(':nombre', $nombre);
+            $sentence->bindParam(':nombre_corto', $nombre_corto);
             $sentence->bindParam(':tipo_identificacion_id', $tipo_identificacion_id);
             $sentence->bindParam(':identificacion', $identificacion);
             $sentence->bindParam(':direccion', $direccion);
@@ -199,6 +205,7 @@ class EntidadesService
             $datosNuevos = [
                 'id' => $entidadId,
                 'nombre' => $nombre,
+                'nombre_corto' => $nombre_corto,
                 'tipo_identificacion_id' => $tipo_identificacion_id,
                 'identificacion' => $identificacion,
                 'direccion' => $direccion,
@@ -262,6 +269,11 @@ class EntidadesService
             if (isset($data['nombre'])) {
                 $updates[] = "nombre = :nombre";
                 $params[':nombre'] = $data['nombre'];
+            }
+            
+            if (isset($data['nombre_corto'])) {
+                $updates[] = "nombre_corto = :nombre_corto";
+                $params[':nombre_corto'] = $data['nombre_corto'];
             }
             
             if (isset($data['tipo_identificacion_id'])) {
@@ -436,6 +448,7 @@ class EntidadesService
                 SELECT 
                     e.id,
                     e.nombre,
+                    e.nombre_corto,
                     e.tipo_identificacion_id,
                     ti.codigo as tipo_identificacion_codigo,
                     e.identificacion,
@@ -452,13 +465,15 @@ class EntidadesService
             if ($q) {
                 $sql .= " AND (
                     e.nombre LIKE :q 
-                    OR e.identificacion LIKE :q2 
-                    OR e.email LIKE :q3
+                    OR e.nombre_corto LIKE :q2
+                    OR e.identificacion LIKE :q3 
+                    OR e.email LIKE :q4
                 )";
                 $searchTerm = '%' . $q . '%';
                 $params[':q'] = $searchTerm;
                 $params[':q2'] = $searchTerm;
                 $params[':q3'] = $searchTerm;
+                $params[':q4'] = $searchTerm;
             }
             
             if ($activo !== null) {

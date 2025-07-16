@@ -758,98 +758,69 @@ class ActividadesService
             $anio = Flight::request()->query->anio;
 
             $db = Flight::db();
-            $usuario_id = AuthService::getUserId();
 
-            // Construir consulta base
-            $sql = "SELECT DISTINCT
-                ra.id,
-                ra.contrato_id,
-                ra.fecha_actividad,
-                ra.descripcion_actividad,
-                ra.audio_narrado_url,
-                ra.transcripcion_texto,
-                ra.transcripcion_proveedor,
-                ra.transcripcion_modelo,
-                ra.transcripcion_confianza,
-                ra.procesado_ia,
-                ra.fecha_registro,
-                ra.fecha_actualizacion,
-                c.numero_contrato,
-                e.nombre as entidad_nombre,
-                cont.id as contratista_id,
-                cont.nombre_completo as contratista_nombre,
-                cont.identificacion as contratista_identificacion,
-                -- Información de obligaciones
-                (SELECT GROUP_CONCAT(
-                    CONCAT(oc.numero_obligacion, '. ', LEFT(oc.descripcion, 50))
-                    ORDER BY oc.numero_obligacion
-                    SEPARATOR ' | '
-                 )
-                 FROM actividades_obligaciones ao
-                 JOIN obligaciones_contractuales oc ON ao.obligacion_id = oc.id
-                 WHERE ao.actividad_id = ra.id
-                ) as obligaciones_info,
-                -- Total de archivos
-                (SELECT COUNT(*) 
-                 FROM actividades_archivos 
-                 WHERE actividad_id = ra.id
-                ) as total_archivos
-            FROM registro_actividades ra
-            JOIN contratos c ON ra.contrato_id = c.id
-            JOIN contratistas cont ON c.contratista_id = cont.id
-            JOIN entidades e ON c.entidad_id = e.id";
+            // Consulta base simplificada
+            $sql = "SELECT 
+            ra.id,
+            ra.contrato_id,
+            ra.fecha_actividad,
+            ra.descripcion_actividad,
+            ra.transcripcion_texto,
+            ra.procesado_ia,
+            c.numero_contrato,
+            e.nombre as entidad_nombre,
+            cont.nombre_completo as contratista_nombre,
+            (SELECT COUNT(*) FROM actividades_archivos WHERE actividad_id = ra.id) as total_archivos
+        FROM registro_actividades ra
+        JOIN contratos c ON ra.contrato_id = c.id
+        JOIN contratistas cont ON c.contratista_id = cont.id
+        JOIN entidades e ON c.entidad_id = e.id
+        WHERE 1=1";
 
-            $where = [];
             $params = [];
 
-            // Si no es admin, filtrar por contratistas asignados
-            if (!AuthService::hasPermission('actividades.ver_todas')) {
-                $sql .= " JOIN usuarios_contratistas uc ON cont.id = uc.contratista_id";
-                $where[] = "uc.usuario_id = ?";
-                $params[] = $usuario_id;
-            }
-
-            // Aplicar filtros
-            if ($contratista_id) {
-                $where[] = "cont.id = ?";
-                $params[] = $contratista_id;
-            }
-
+            // Filtros básicos
             if ($contrato_id) {
-                $where[] = "ra.contrato_id = ?";
+                $sql .= " AND ra.contrato_id = ?";
                 $params[] = $contrato_id;
             }
 
             if ($mes) {
-                $where[] = "MONTH(ra.fecha_actividad) = ?";
+                $sql .= " AND MONTH(ra.fecha_actividad) = ?";
                 $params[] = $mes;
             }
 
             if ($anio) {
-                $where[] = "YEAR(ra.fecha_actividad) = ?";
+                $sql .= " AND YEAR(ra.fecha_actividad) = ?";
                 $params[] = $anio;
             }
 
-            // Agregar WHERE si hay condiciones
-            if (!empty($where)) {
-                $sql .= " WHERE " . implode(" AND ", $where);
+            // Ordenar por fecha
+            $sql .= " ORDER BY ra.fecha_actividad DESC";
+
+            // Preparar y ejecutar
+            $stmt = $db->prepare($sql);
+
+            // Vincular parámetros
+            for ($i = 0; $i < count($params); $i++) {
+                $stmt->bindValue($i + 1, $params[$i]);
             }
 
-            // Ordenar por fecha descendente
-            $sql .= " ORDER BY ra.fecha_actividad DESC, ra.id DESC";
+            $stmt->execute();
+            $actividades = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-            $actividades = $db->fetchAll($sql, $params);
-
-            // Obtener obligaciones de cada actividad
+            // Para cada actividad, obtener obligaciones
             foreach ($actividades as &$actividad) {
-                $actividad['obligaciones'] = $db->fetchAll(
-                    "SELECT oc.id, oc.numero_obligacion, oc.descripcion
-                 FROM actividades_obligaciones ao
-                 JOIN obligaciones_contractuales oc ON ao.obligacion_id = oc.id
-                 WHERE ao.actividad_id = ?
-                 ORDER BY oc.numero_obligacion",
-                    [$actividad['id']]
-                );
+                // Obtener obligaciones
+                $stmtObl = $db->prepare("
+                SELECT oc.id, oc.numero_obligacion, oc.descripcion
+                FROM actividades_obligaciones ao
+                JOIN obligaciones_contractuales oc ON ao.obligacion_id = oc.id
+                WHERE ao.actividad_id = ?
+            ");
+                $stmtObl->bindParam(1, $actividad['id']);
+                $stmtObl->execute();
+                $actividad['obligaciones'] = $stmtObl->fetchAll(PDO::FETCH_ASSOC);
             }
 
             Flight::json([
@@ -858,8 +829,8 @@ class ActividadesService
                 'total' => count($actividades)
             ]);
         } catch (Exception $e) {
-            error_log("Error al obtener todas las actividades: " . $e->getMessage());
-            Flight::json(['error' => 'Error al obtener actividades'], 500);
+            error_log("Error al obtener actividades: " . $e->getMessage());
+            Flight::json(['error' => 'Error al obtener actividades: ' . $e->getMessage()], 500);
         }
     }
 
