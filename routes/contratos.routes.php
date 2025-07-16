@@ -9,3 +9,4 @@ Flight::route('POST /contratos/supervisores', [ContratosService::class, 'gestion
 Flight::route('POST /contratos/obligaciones', [ContratosService::class, 'gestionarObligaciones']);
 Flight::route('POST /contratos/valores-mensuales', [ContratosService::class, 'gestionarValoresMensuales']);
 Flight::route('GET /contratos/buscar', [ContratosService::class, 'buscar']);
+Flight::route('GET /contratos/por-contratista/@contratista_id', [ContratosService::class, 'obtenerPorContratista']);

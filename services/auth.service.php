@@ -4,24 +4,24 @@ class AuthService
     public static function login()
     {
         $db = Flight::db();
-        
+
         // Obtener datos del request
         $data = Flight::request()->data->getData();
-        
+
         $email = $data['email'] ?? null;
         $password = $data['password'] ?? null;
-        
+
         // Buscar usuario
         $sentence = $db->prepare("SELECT id, nombre, email, password FROM usuarios WHERE email = :email AND activo = 1");
         $sentence->bindParam(':email', $email);
         $sentence->execute();
         $user = $sentence->fetch(PDO::FETCH_ASSOC);
-        
+
         if ($user && password_verify($password, $user['password'])) {
             // Generar tokens
             $tokens = generateTokenPair($user['id']);
             $deviceInfo = getDeviceInfo();
-            
+
             // Eliminar sesiones anteriores del mismo dispositivo
             $deleteSentence = $db->prepare("
                 DELETE FROM sesiones 
@@ -31,7 +31,7 @@ class AuthService
             $deleteSentence->bindParam(':usuario_id', $user['id']);
             $deleteSentence->bindParam(':dispositivo', $deviceInfo['device']);
             $deleteSentence->execute();
-            
+
             // Crear nueva sesión con refresh token
             $insertSentence = $db->prepare("
                 INSERT INTO sesiones (
@@ -53,9 +53,9 @@ class AuthService
             $insertSentence->bindParam(':dispositivo', $deviceInfo['device']);
             $insertSentence->bindParam(':ip', $deviceInfo['ip']);
             $insertSentence->execute();
-            
+
             $sesionId = $db->lastInsertId();
-            
+
             // AUDITORÍA - Registrar inicio de sesión
             $datosAuditoria = [
                 'usuario_id' => $user['id'],
@@ -64,15 +64,15 @@ class AuthService
                 'ip' => $deviceInfo['ip'],
                 'accion' => 'LOGIN_SUCCESS'
             ];
-            
+
             AuditService::registrar('sesiones', $sesionId, 'CREATE', null, $datosAuditoria, $user);
-            
+
             // Obtener roles del usuario
             $roles = self::getUserRoles($user['id']);
-            
+
             // Obtener permisos del usuario
             $permisos = self::getUserPermissions($user['id']);
-            
+
             // Retornar datos del usuario, tokens, roles y permisos
             Flight::json(array(
                 'success' => true,
@@ -95,22 +95,22 @@ class AuthService
                 'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown',
                 'accion' => 'LOGIN_FAILED'
             ];
-            
+
             // Para intentos fallidos, usamos usuario_id = 0
             AuditService::registrar('intentos_login', 0, 'CREATE', null, $datosAuditoria);
-            
+
             Flight::json(array('error' => 'Credenciales incorrectas'), 401);
         }
     }
-    
+
     public static function logout()
     {
         $headers = getallheaders();
         $token = isset($headers['Authorization']) ? str_replace('Bearer ', '', $headers['Authorization']) : null;
-        
+
         if ($token) {
             $db = Flight::db();
-            
+
             // Obtener información de la sesión antes de eliminarla
             $selectSentence = $db->prepare("
                 SELECT s.*, u.nombre, u.email 
@@ -121,13 +121,13 @@ class AuthService
             $selectSentence->bindParam(':token', $token);
             $selectSentence->execute();
             $sesion = $selectSentence->fetch();
-            
+
             if ($sesion) {
                 // Eliminar la sesión
                 $sentence = $db->prepare("DELETE FROM sesiones WHERE token = :token");
                 $sentence->bindParam(':token', $token);
                 $sentence->execute();
-                
+
                 // AUDITORÍA - Registrar cierre de sesión
                 $datosAuditoria = [
                     'usuario_id' => $sesion['usuario_id'],
@@ -136,66 +136,66 @@ class AuthService
                     'ip' => $sesion['ip_address'],
                     'accion' => 'LOGOUT'
                 ];
-                
+
                 $usuario = [
                     'id' => $sesion['usuario_id'],
                     'nombre' => $sesion['nombre']
                 ];
-                
+
                 AuditService::registrar('sesiones', $sesion['id'], 'DELETE', $datosAuditoria, null, $usuario);
             }
         }
-        
+
         Flight::json(array('success' => true, 'message' => 'Sesión cerrada correctamente'));
     }
-    
+
     public static function validateSession()
     {
         $headers = getallheaders();
         $token = isset($headers['Authorization']) ? str_replace('Bearer ', '', $headers['Authorization']) : null;
-        
+
         if ($token) {
             $user = validateToken($token);
             if ($user) {
                 // Agregar roles y permisos
                 $user['roles'] = self::getUserRoles($user['id']);
                 $user['permisos'] = self::getUserPermissions($user['id']);
-                
+
                 Flight::json(array('success' => true, 'user' => $user));
                 return;
             }
         }
-        
+
         Flight::json(array('error' => 'Sesión inválida'), 401);
     }
-    
+
     public static function register()
     {
         $db = Flight::db();
-        
+
         // Obtener datos del request
         $data = Flight::request()->data->getData();
-        
+
         $nombre = $data['nombre'] ?? null;
         $email = $data['email'] ?? null;
         $password = $data['password'] ?? null;
-        
+
         // Validar que el email no exista
         $checkSentence = $db->prepare("SELECT id FROM usuarios WHERE email = :email");
         $checkSentence->bindParam(':email', $email);
         $checkSentence->execute();
-        
+
         if ($checkSentence->fetch()) {
             Flight::json(array('error' => 'El email ya está registrado'), 400);
             return;
         }
-        
+
         // Encriptar contraseña
         $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
-        
+
         // Iniciar transacción
         $db->beginTransaction();
-        
+
         try {
             // Insertar usuario
             $sentence = $db->prepare("INSERT INTO usuarios (nombre, email, password) VALUES (:nombre, :email, :password)");
@@ -203,9 +203,9 @@ class AuthService
             $sentence->bindParam(':email', $email);
             $sentence->bindParam(':password', $hashedPassword);
             $sentence->execute();
-            
+
             $userId = $db->lastInsertId();
-            
+
             // Asignar rol por defecto (usuario)
             $rolSentence = $db->prepare("
                 INSERT INTO usuarios_roles (usuario_id, rol_id) 
@@ -213,7 +213,7 @@ class AuthService
             ");
             $rolSentence->bindParam(':usuario_id', $userId);
             $rolSentence->execute();
-            
+
             // AUDITORÍA - Registrar registro de usuario
             $datosNuevos = [
                 'id' => $userId,
@@ -222,17 +222,17 @@ class AuthService
                 'roles' => ['usuario'],
                 'origen' => 'SELF_REGISTER'
             ];
-            
+
             // En el registro, el usuario se crea a sí mismo
             $usuario = [
                 'id' => $userId,
                 'nombre' => $nombre
             ];
-            
+
             AuditService::registrar('usuarios', $userId, 'CREATE', null, $datosNuevos, $usuario);
-            
+
             $db->commit();
-            
+
             Flight::json(array(
                 'success' => true,
                 'message' => 'Usuario registrado correctamente',
@@ -245,20 +245,20 @@ class AuthService
             ));
         } catch (Exception $e) {
             $db->rollBack();
-            
+
             // AUDITORÍA - Registrar fallo en registro
             $datosAuditoria = [
                 'email_intento' => $email,
                 'error' => $e->getMessage(),
                 'accion' => 'REGISTER_FAILED'
             ];
-            
+
             AuditService::registrar('intentos_registro', 0, 'CREATE', null, $datosAuditoria);
-            
+
             Flight::json(array('error' => 'Error al registrar usuario'), 500);
         }
     }
-    
+
     // Obtener roles de un usuario
     public static function getUserRoles($userId)
     {
@@ -271,15 +271,15 @@ class AuthService
         ");
         $sentence->bindParam(':usuario_id', $userId);
         $sentence->execute();
-        
+
         $roles = [];
         while ($row = $sentence->fetch(PDO::FETCH_ASSOC)) {
             $roles[] = $row['nombre'];
         }
-        
+
         return $roles;
     }
-    
+
     // Obtener permisos de un usuario
     private static function getUserPermissions($userId)
     {
@@ -296,15 +296,15 @@ class AuthService
         ");
         $sentence->bindParam(':usuario_id', $userId);
         $sentence->execute();
-        
+
         $permisos = [];
         while ($row = $sentence->fetch(PDO::FETCH_ASSOC)) {
             $permisos[] = $row['nombre'];
         }
-        
+
         return $permisos;
     }
-    
+
     // Verificar si un usuario tiene un permiso específico
     public static function checkPermission($userId, $permiso)
     {
@@ -323,29 +323,29 @@ class AuthService
         $sentence->bindParam(':usuario_id', $userId);
         $sentence->bindParam(':permiso', $permiso);
         $sentence->execute();
-        
+
         $result = $sentence->fetch(PDO::FETCH_ASSOC);
         return $result['tiene_permiso'] > 0;
     }
-    
+
     // Renovar token usando refresh token
     public static function refreshToken()
     {
         $db = Flight::db();
-        
+
         // Obtener refresh token del request
         $data = Flight::request()->data->getData();
-        
+
         $refreshToken = $data['refresh_token'] ?? null;
-        
+
         if (!$refreshToken) {
             Flight::json(array('error' => 'Refresh token no proporcionado'), 400);
             return;
         }
-        
+
         // Validar refresh token
         $session = validateRefreshToken($refreshToken);
-        
+
         if (!$session) {
             // AUDITORÍA - Intento de renovación con token inválido
             $datosAuditoria = [
@@ -353,24 +353,24 @@ class AuthService
                 'ip' => $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0',
                 'accion' => 'REFRESH_TOKEN_FAILED'
             ];
-            
+
             AuditService::registrar('intentos_refresh', 0, 'CREATE', null, $datosAuditoria);
-            
+
             Flight::json(array('error' => 'Refresh token inválido o expirado'), 401);
             return;
         }
-        
+
         // Generar nuevos tokens
         $tokens = generateTokenPair($session['user_id']);
         $deviceInfo = getDeviceInfo();
-        
+
         // Datos anteriores de la sesión
         $datosAnteriores = [
             'token' => substr($session['token'], 0, 10) . '...',
             'refresh_token' => substr($session['refresh_token'], 0, 10) . '...',
             'fecha_expiracion' => $session['fecha_expiracion']
         ];
-        
+
         // Actualizar sesión con nuevos tokens
         $updateSentence = $db->prepare("
             UPDATE sesiones SET
@@ -389,7 +389,7 @@ class AuthService
         $updateSentence->bindParam(':ip', $deviceInfo['ip']);
         $updateSentence->bindParam(':sesion_id', $session['id']);
         $updateSentence->execute();
-        
+
         // Datos nuevos de la sesión
         $datosNuevos = [
             'token' => substr($tokens['access_token'], 0, 10) . '...',
@@ -397,19 +397,19 @@ class AuthService
             'ip' => $deviceInfo['ip'],
             'accion' => 'TOKEN_REFRESHED'
         ];
-        
+
         // AUDITORÍA - Registrar renovación de token
         $usuario = [
             'id' => $session['user_id'],
             'nombre' => $session['nombre']
         ];
-        
+
         AuditService::registrar('sesiones', $session['id'], 'UPDATE', $datosAnteriores, $datosNuevos, $usuario);
-        
+
         // Obtener roles y permisos actualizados
         $roles = self::getUserRoles($session['user_id']);
         $permisos = self::getUserPermissions($session['user_id']);
-        
+
         Flight::json(array(
             'success' => true,
             'access_token' => $tokens['access_token'],
@@ -424,13 +424,13 @@ class AuthService
             )
         ));
     }
-    
+
     // Obtener sesiones activas del usuario
     public static function getSessions()
     {
         requireAuth();
         $currentUser = Flight::get('currentUser');
-        
+
         $db = Flight::db();
         $sentence = $db->prepare("
             SELECT 
@@ -446,33 +446,33 @@ class AuthService
             AND fecha_expiracion_refresh > NOW()
             ORDER BY fecha_ultimo_uso DESC
         ");
-        
+
         $headers = getallheaders();
         $currentToken = str_replace('Bearer ', '', $headers['Authorization']);
-        
+
         $sentence->bindParam(':usuario_id', $currentUser['id']);
         $sentence->bindParam(':current_token', $currentToken);
         $sentence->execute();
-        
+
         $sessions = $sentence->fetchAll();
-        
+
         Flight::json(array(
             'success' => true,
             'sessions' => $sessions
         ));
     }
-    
+
     // Cerrar todas las sesiones excepto la actual
     public static function logoutAll()
     {
         requireAuth();
         $currentUser = Flight::get('currentUser');
-        
+
         $headers = getallheaders();
         $currentToken = str_replace('Bearer ', '', $headers['Authorization']);
-        
+
         $db = Flight::db();
-        
+
         // Obtener las sesiones que se van a eliminar para auditoría
         $selectSentence = $db->prepare("
             SELECT id, dispositivo, ip_address 
@@ -484,7 +484,7 @@ class AuthService
         $selectSentence->bindParam(':current_token', $currentToken);
         $selectSentence->execute();
         $sesionesEliminadas = $selectSentence->fetchAll();
-        
+
         // Eliminar las sesiones
         $sentence = $db->prepare("
             DELETE FROM sesiones 
@@ -494,7 +494,7 @@ class AuthService
         $sentence->bindParam(':usuario_id', $currentUser['id']);
         $sentence->bindParam(':current_token', $currentToken);
         $sentence->execute();
-        
+
         // AUDITORÍA - Registrar cierre masivo de sesiones
         if (count($sesionesEliminadas) > 0) {
             $datosAuditoria = [
@@ -503,13 +503,65 @@ class AuthService
                 'dispositivos' => array_column($sesionesEliminadas, 'dispositivo'),
                 'accion' => 'LOGOUT_ALL_SESSIONS'
             ];
-            
+
             AuditService::registrar('sesiones', 0, 'DELETE', $datosAuditoria, null);
         }
-        
+
         Flight::json(array(
             'success' => true,
             'message' => 'Todas las demás sesiones han sido cerradas'
         ));
+    }
+
+    /**
+     * Obtener el ID del usuario actual desde el token
+     */
+    public static function getUserId()
+    {
+        $headers = getallheaders();
+        $token = isset($headers['Authorization']) ? str_replace('Bearer ', '', $headers['Authorization']) : null;
+
+        if ($token) {
+            $user = validateToken($token);
+            if ($user && isset($user['id'])) {
+                return $user['id'];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Obtener toda la información del usuario actual
+     */
+    public static function getCurrentUser()
+    {
+        $headers = getallheaders();
+        $token = isset($headers['Authorization']) ? str_replace('Bearer ', '', $headers['Authorization']) : null;
+
+        if ($token) {
+            $user = validateToken($token);
+            if ($user) {
+                // Agregar roles y permisos
+                $user['roles'] = self::getUserRoles($user['id']);
+                $user['permisos'] = self::getUserPermissions($user['id']);
+                return $user;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Verificar si el usuario actual tiene un permiso específico
+     */
+    public static function hasPermission($permiso)
+    {
+        $userId = self::getUserId();
+        if (!$userId) {
+            return false;
+        }
+
+        return self::checkPermission($userId, $permiso);
     }
 }
