@@ -17,33 +17,31 @@ class IAModelosService
             
             $db = Flight::db();
             
-            // Usar la vista si es transcripción, sino query directo
-            if ($tipo === 'transcripcion') {
-                $sql = "SELECT * FROM v_modelos_transcripcion ORDER BY costo_por_minuto ASC, es_predeterminado DESC";
-                $stmt = $db->query($sql);
-            } else {
-                $sql = "
-                    SELECT 
-                        mc.id,
-                        mc.proveedor,
-                        mc.modelo,
-                        mc.dimensiones,
-                        mc.costo_por_1k_tokens,
-                        mc.limite_tokens,
-                        mc.activo,
-                        mc.es_predeterminado,
-                        mc.configuracion_json,
-                        tm.nombre as tipo_nombre,
-                        tm.codigo as tipo_codigo
-                    FROM ia_modelos_config mc
-                    INNER JOIN tipos_modelo_ia tm ON mc.tipo_modelo_id = tm.id
-                    WHERE tm.codigo = :tipo AND mc.activo = 1
-                    ORDER BY mc.es_predeterminado DESC, mc.costo_por_1k_tokens ASC
-                ";
-                $stmt = $db->prepare($sql);
-                $stmt->bindParam(':tipo', $tipo);
-                $stmt->execute();
-            }
+            $sql = "
+                SELECT 
+                    im.id,
+                    im.proveedor,
+                    im.modelo,
+                    im.tipo_modelo_id,
+                    im.dimensiones,
+                    im.costo_por_1k_tokens,
+                    im.limite_tokens,
+                    im.limite_requests_hora,
+                    im.activo,
+                    im.es_predeterminado,
+                    im.configuracion_json,
+                    tm.nombre as tipo_nombre,
+                    tm.codigo as tipo_codigo,
+                    tm.requiere_dimensiones
+                FROM ia_modelos im
+                INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
+                WHERE tm.codigo = :tipo AND im.activo = 1
+                ORDER BY im.es_predeterminado DESC, im.costo_por_1k_tokens ASC
+            ";
+            
+            $stmt = $db->prepare($sql);
+            $stmt->bindParam(':tipo', $tipo);
+            $stmt->execute();
             
             $modelos = $stmt->fetchAll();
             
@@ -92,18 +90,36 @@ class IAModelosService
             $modeloId = $_POST['modelo_id'] ?? null;
             
             if (!$modeloId) {
-                responderJSON(['error' => 'Modelo no especificado'], 400);
-                return;
+                // Obtener modelo predeterminado de transcripción
+                $db = Flight::db();
+                $stmt = $db->prepare("
+                    SELECT im.id 
+                    FROM ia_modelos im
+                    INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
+                    WHERE tm.codigo = 'transcripcion' 
+                    AND im.activo = 1 
+                    AND im.es_predeterminado = 1
+                    LIMIT 1
+                ");
+                $stmt->execute();
+                $modeloDefault = $stmt->fetch();
+                
+                if ($modeloDefault) {
+                    $modeloId = $modeloDefault['id'];
+                } else {
+                    responderJSON(['error' => 'No hay modelo de transcripción disponible'], 400);
+                    return;
+                }
             }
             
             $db = Flight::db();
             
             // Obtener configuración del modelo
             $stmt = $db->prepare("
-                SELECT mc.*, tm.codigo as tipo_codigo
-                FROM ia_modelos_config mc
-                INNER JOIN tipos_modelo_ia tm ON mc.tipo_modelo_id = tm.id
-                WHERE mc.id = :modelo_id AND mc.activo = 1
+                SELECT im.*, tm.codigo as tipo_codigo
+                FROM ia_modelos im
+                INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
+                WHERE im.id = :modelo_id AND im.activo = 1
             ");
             $stmt->bindParam(':modelo_id', $modeloId);
             $stmt->execute();
@@ -140,8 +156,7 @@ class IAModelosService
                 // Guardar audio temporalmente
                 $audioInfo = $storage->guardarArchivo($audioFile, 'temp', 'transcripciones');
                 
-                // Para transcripción, necesitamos el contenido del archivo
-                // En lugar de usar getFullPath, obtenemos el archivo
+                // Obtener el archivo para transcribir
                 $archivoData = $storage->obtenerArchivo($audioInfo['path']);
                 
                 // Crear archivo temporal para el provider
@@ -154,10 +169,10 @@ class IAModelosService
                 // Limpiar archivo temporal local
                 unlink($tempFile);
                 
-                // Registrar uso (para tracking de costos)
-                self::registrarUsoModelo($modeloId, $resultado['tokens_usados'] ?? 0, $modelo);
+                // Registrar uso
+                self::registrarUsoModelo($modeloId, null, $resultado['tokens_usados'] ?? 0, $modelo);
                 
-                // Limpiar archivo temporal
+                // Limpiar archivo temporal del storage
                 $storage->eliminarArchivo($audioInfo['path']);
                 
                 responderJSON([
@@ -205,8 +220,8 @@ class IAModelosService
             // Obtener resumen por modelo
             $sql = "
                 SELECT 
-                    mc.proveedor,
-                    mc.modelo,
+                    im.proveedor,
+                    im.modelo,
                     tm.nombre as tipo_modelo,
                     COUNT(mu.id) as total_usos,
                     SUM(mu.tokens_total) as tokens_totales,
@@ -216,9 +231,9 @@ class IAModelosService
                     SUM(CASE WHEN mu.exitoso = 0 THEN 1 ELSE 0 END) as usos_fallidos,
                     MAX(mu.fecha_uso) as ultimo_uso
                 FROM ia_modelos_uso mu
-                INNER JOIN ia_modelos_config mc ON mu.modelo_config_id = mc.id
-                INNER JOIN tipos_modelo_ia tm ON mc.tipo_modelo_id = tm.id
-                GROUP BY mc.id
+                INNER JOIN ia_modelos im ON mu.modelo_config_id = im.id
+                INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
+                GROUP BY im.id
                 ORDER BY costo_total_usd DESC
             ";
             
@@ -263,10 +278,10 @@ class IAModelosService
             
             // Obtener el modelo y su tipo
             $stmt = $db->prepare("
-                SELECT mc.*, tm.codigo as tipo_codigo
-                FROM ia_modelos_config mc
-                INNER JOIN tipos_modelo_ia tm ON mc.tipo_modelo_id = tm.id
-                WHERE mc.id = :id
+                SELECT im.*, tm.codigo as tipo_codigo
+                FROM ia_modelos im
+                INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
+                WHERE im.id = :id
             ");
             $stmt->bindParam(':id', $id);
             $stmt->execute();
@@ -282,9 +297,9 @@ class IAModelosService
             try {
                 // Quitar predeterminado de otros modelos del mismo tipo
                 $stmtUpdate = $db->prepare("
-                    UPDATE ia_modelos_config mc
-                    INNER JOIN tipos_modelo_ia tm ON mc.tipo_modelo_id = tm.id
-                    SET mc.es_predeterminado = 0
+                    UPDATE ia_modelos im
+                    INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
+                    SET im.es_predeterminado = 0
                     WHERE tm.codigo = :tipo_codigo
                 ");
                 $stmtUpdate->bindParam(':tipo_codigo', $modelo['tipo_codigo']);
@@ -292,7 +307,7 @@ class IAModelosService
                 
                 // Establecer como predeterminado
                 $stmtSet = $db->prepare("
-                    UPDATE ia_modelos_config
+                    UPDATE ia_modelos
                     SET es_predeterminado = 1
                     WHERE id = :id
                 ");
@@ -300,12 +315,6 @@ class IAModelosService
                 $stmtSet->execute();
                 
                 $db->commit();
-                
-                // Auditoría
-                AuditService::registrar('ia_modelos_config', $id, 'UPDATE', 
-                    ['es_predeterminado' => 0], 
-                    ['es_predeterminado' => 1]
-                );
                 
                 responderJSON([
                     'success' => true,
@@ -326,7 +335,7 @@ class IAModelosService
     /**
      * Registrar uso de un modelo (método privado)
      */
-    private static function registrarUsoModelo($modeloId, $tokensUsados, $modeloConfig)
+    private static function registrarUsoModelo($modeloId, $actividadId, $tokensUsados, $modeloConfig)
     {
         try {
             $db = Flight::db();
@@ -337,7 +346,7 @@ class IAModelosService
                 $costo = ($tokensUsados / 1000) * $modeloConfig['costo_por_1k_tokens'];
             }
             
-            // Para modelos de transcripción por minuto
+            // Para modelos de transcripción, si tienen costo por minuto
             if (isset($modeloConfig['configuracion']['costo_por_minuto'])) {
                 $duracionMinutos = $tokensUsados / 150; // Estimación: 150 palabras por minuto
                 $costo = $duracionMinutos * $modeloConfig['configuracion']['costo_por_minuto'];
@@ -346,13 +355,13 @@ class IAModelosService
             $stmt = $db->prepare("
                 INSERT INTO ia_modelos_uso (
                     modelo_config_id,
-                    tokens_entrada,
+                    actividad_id,
                     tokens_total,
                     costo_usd,
                     exitoso
                 ) VALUES (
                     :modelo_id,
-                    :tokens,
+                    :actividad_id,
                     :tokens,
                     :costo,
                     1
@@ -360,6 +369,7 @@ class IAModelosService
             ");
             
             $stmt->bindParam(':modelo_id', $modeloId);
+            $stmt->bindParam(':actividad_id', $actividadId);
             $stmt->bindParam(':tokens', $tokensUsados);
             $stmt->bindParam(':costo', $costo);
             $stmt->execute();

@@ -81,14 +81,14 @@ class ActividadesObligacionesService
             $db = Flight::db();
             
             $sql = "SELECT 
-                    ra.id,
-                    ra.fecha_actividad,
-                    ra.descripcion_actividad,
+                    a.id,
+                    a.fecha_actividad,
+                    a.descripcion_actividad,
                     ao.fecha_asignacion
                 FROM actividades_obligaciones ao
-                INNER JOIN registro_actividades ra ON ao.actividad_id = ra.id
+                INNER JOIN actividades a ON ao.actividad_id = a.id
                 WHERE ao.obligacion_id = :obligacion_id
-                ORDER BY ra.fecha_actividad DESC";
+                ORDER BY a.fecha_actividad DESC";
             
             $stmt = $db->prepare($sql);
             $stmt->bindParam(':obligacion_id', $obligacionId);
@@ -134,12 +134,12 @@ class ActividadesObligacionesService
                     oc.numero_obligacion,
                     oc.descripcion,
                     COUNT(DISTINCT ao.actividad_id) as total_actividades,
-                    COUNT(DISTINCT DATE(ra.fecha_actividad)) as dias_cumplidos
+                    COUNT(DISTINCT DATE(a.fecha_actividad)) as dias_cumplidos
                 FROM obligaciones_contractuales oc
                 LEFT JOIN actividades_obligaciones ao ON oc.id = ao.obligacion_id
-                LEFT JOIN registro_actividades ra ON ao.actividad_id = ra.id 
-                    AND MONTH(ra.fecha_actividad) = :mes 
-                    AND YEAR(ra.fecha_actividad) = :anio
+                LEFT JOIN actividades a ON ao.actividad_id = a.id 
+                    AND MONTH(a.fecha_actividad) = :mes 
+                    AND YEAR(a.fecha_actividad) = :anio
                 WHERE oc.contrato_id = :contrato_id
                 GROUP BY oc.id, oc.numero_obligacion, oc.descripcion
                 ORDER BY oc.numero_obligacion";

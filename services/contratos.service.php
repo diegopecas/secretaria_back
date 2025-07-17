@@ -1133,7 +1133,7 @@ class ContratosService
             WHERE contrato_id = c.id AND activo = 1) as total_obligaciones,
             -- Total de actividades
             (SELECT COUNT(*) 
-            FROM registro_actividades 
+            FROM actividades 
             WHERE contrato_id = c.id) as total_actividades,
             -- Progreso (basado en fechas)
             CASE 
