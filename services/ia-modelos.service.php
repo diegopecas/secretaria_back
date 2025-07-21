@@ -8,15 +8,15 @@ class IAModelosService
     {
         try {
             requireAuth();
-            
+
             $tiposValidos = ['transcripcion', 'embedding', 'analisis', 'generacion'];
             if (!in_array($tipo, $tiposValidos)) {
                 responderJSON(['error' => 'Tipo de modelo no válido'], 400);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             $sql = "
                 SELECT 
                     im.id,
@@ -38,13 +38,13 @@ class IAModelosService
                 WHERE tm.codigo = :tipo AND im.activo = 1
                 ORDER BY im.es_predeterminado DESC, im.costo_por_1k_tokens ASC
             ";
-            
+
             $stmt = $db->prepare($sql);
             $stmt->bindParam(':tipo', $tipo);
             $stmt->execute();
-            
+
             $modelos = $stmt->fetchAll();
-            
+
             // Decodificar JSON de configuración
             foreach ($modelos as &$modelo) {
                 if (isset($modelo['configuracion_json'])) {
@@ -52,13 +52,12 @@ class IAModelosService
                     unset($modelo['configuracion_json']);
                 }
             }
-            
+
             responderJSON([
                 'success' => true,
                 'tipo' => $tipo,
                 'modelos' => $modelos
             ]);
-            
         } catch (Exception $e) {
             error_log("Error obteniendo modelos IA: " . $e->getMessage());
             responderJSON(['error' => 'Error al obtener modelos'], 500);
@@ -73,22 +72,43 @@ class IAModelosService
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             // Verificar permisos
             if (!AuthService::checkPermission($currentUser['id'], 'actividades.registrar')) {
                 responderJSON(['error' => 'No tiene permisos para transcribir'], 403);
                 return;
             }
-            
+
             // Validar archivo de audio
             if (!isset($_FILES['audio'])) {
                 responderJSON(['error' => 'No se recibió archivo de audio'], 400);
                 return;
             }
-            
+
             $audioFile = $_FILES['audio'];
             $modeloId = $_POST['modelo_id'] ?? null;
-            
+            // Cargar el servicio de configuración
+            require_once __DIR__ . '/configuracion.service.php';
+
+            // Obtener límites desde configuración
+            $maxSizeMB = ConfiguracionService::get('max_audio_size_mb', 'ia', 25);
+            $maxDurationSeconds = ConfiguracionService::get('max_audio_duration_seconds', 'ia', 600);
+
+            // Validar tamaño del archivo
+            $maxSize = $maxSizeMB * 1024 * 1024;
+            if ($audioFile['size'] > $maxSize) {
+                responderJSON([
+                    'error' => "El archivo de audio es demasiado grande. Máximo: {$maxSizeMB}MB"
+                ], 400);
+                return;
+            }
+
+            // Validar tipo de archivo
+            $tiposPermitidos = ['audio/webm', 'audio/mp3', 'audio/mpeg', 'audio/wav', 'audio/ogg'];
+            if (!in_array($audioFile['type'], $tiposPermitidos)) {
+                responderJSON(['error' => 'Tipo de archivo no soportado'], 400);
+                return;
+            }
             if (!$modeloId) {
                 // Obtener modelo predeterminado de transcripción
                 $db = Flight::db();
@@ -103,7 +123,7 @@ class IAModelosService
                 ");
                 $stmt->execute();
                 $modeloDefault = $stmt->fetch();
-                
+
                 if ($modeloDefault) {
                     $modeloId = $modeloDefault['id'];
                 } else {
@@ -111,9 +131,9 @@ class IAModelosService
                     return;
                 }
             }
-            
+
             $db = Flight::db();
-            
+
             // Obtener configuración del modelo
             $stmt = $db->prepare("
                 SELECT im.*, tm.codigo as tipo_codigo
@@ -124,18 +144,18 @@ class IAModelosService
             $stmt->bindParam(':modelo_id', $modeloId);
             $stmt->execute();
             $modelo = $stmt->fetch();
-            
+
             if (!$modelo) {
                 responderJSON(['error' => 'Modelo no encontrado o no disponible'], 404);
                 return;
             }
-            
+
             // Verificar que sea un modelo de transcripción
             if ($modelo['tipo_codigo'] !== 'transcripcion') {
                 responderJSON(['error' => 'El modelo seleccionado no es de transcripción'], 400);
                 return;
             }
-            
+
             // Para el navegador, no necesitamos hacer nada especial
             if ($modelo['proveedor'] === 'navegador') {
                 responderJSON([
@@ -144,37 +164,37 @@ class IAModelosService
                 ]);
                 return;
             }
-            
+
             // Para otros proveedores, usar ProviderManager
             require_once __DIR__ . '/../providers/ai/provider-manager.php';
             require_once __DIR__ . '/../providers/storage/storage.manager.php';
-            
+
             $providerManager = ProviderManager::getInstance();
             $storage = StorageManager::getInstance();
-            
+
             try {
                 // Guardar audio temporalmente
                 $audioInfo = $storage->guardarArchivo($audioFile, 'temp', 'transcripciones');
-                
+
                 // Obtener el archivo para transcribir
                 $archivoData = $storage->obtenerArchivo($audioInfo['path']);
-                
+
                 // Crear archivo temporal para el provider
                 $tempFile = tempnam(sys_get_temp_dir(), 'audio_');
                 file_put_contents($tempFile, $archivoData['content']);
-                
+
                 // Transcribir usando el provider
                 $resultado = $providerManager->transcribirAudio($tempFile, $modelo);
-                
+
                 // Limpiar archivo temporal local
                 unlink($tempFile);
-                
+
                 // Registrar uso
                 self::registrarUsoModelo($modeloId, null, $resultado['tokens_usados'] ?? 0, $modelo);
-                
+
                 // Limpiar archivo temporal del storage
                 $storage->eliminarArchivo($audioInfo['path']);
-                
+
                 responderJSON([
                     'success' => true,
                     'texto' => $resultado['texto'],
@@ -183,17 +203,15 @@ class IAModelosService
                     'confianza' => $resultado['confianza'] ?? 0.95,
                     'duracion_segundos' => $resultado['duracion_segundos'] ?? null
                 ]);
-                
             } catch (Exception $e) {
                 // Limpiar archivo temporal si existe
                 if (isset($audioInfo)) {
                     $storage->eliminarArchivo($audioInfo['path']);
                 }
-                
+
                 error_log("Error en transcripción con {$modelo['proveedor']}: " . $e->getMessage());
                 responderJSON(['error' => 'Error al transcribir: ' . $e->getMessage()], 500);
             }
-            
         } catch (Exception $e) {
             error_log("Error en transcripción: " . $e->getMessage());
             responderJSON(['error' => 'Error al transcribir audio'], 500);
@@ -208,15 +226,15 @@ class IAModelosService
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             // Solo administradores pueden ver el resumen de uso
             if (!AuthService::checkPermission($currentUser['id'], 'sistema.configurar')) {
                 responderJSON(['error' => 'No tiene permisos para ver esta información'], 403);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             // Obtener resumen por modelo
             $sql = "
                 SELECT 
@@ -236,23 +254,22 @@ class IAModelosService
                 GROUP BY im.id
                 ORDER BY costo_total_usd DESC
             ";
-            
+
             $stmt = $db->query($sql);
             $resumen = $stmt->fetchAll();
-            
+
             // Calcular totales
             $totales = [
                 'total_usos' => array_sum(array_column($resumen, 'total_usos')),
                 'tokens_totales' => array_sum(array_column($resumen, 'tokens_totales')),
                 'costo_total_usd' => array_sum(array_column($resumen, 'costo_total_usd'))
             ];
-            
+
             responderJSON([
                 'success' => true,
                 'resumen' => $resumen,
                 'totales' => $totales
             ]);
-            
         } catch (Exception $e) {
             error_log("Error obteniendo resumen de uso: " . $e->getMessage());
             responderJSON(['error' => 'Error al obtener resumen de uso'], 500);
@@ -267,15 +284,15 @@ class IAModelosService
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             // Solo administradores
             if (!AuthService::checkPermission($currentUser['id'], 'sistema.configurar')) {
                 responderJSON(['error' => 'No tiene permisos para cambiar configuración'], 403);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             // Obtener el modelo y su tipo
             $stmt = $db->prepare("
                 SELECT im.*, tm.codigo as tipo_codigo
@@ -286,14 +303,14 @@ class IAModelosService
             $stmt->bindParam(':id', $id);
             $stmt->execute();
             $modelo = $stmt->fetch();
-            
+
             if (!$modelo) {
                 responderJSON(['error' => 'Modelo no encontrado'], 404);
                 return;
             }
-            
+
             $db->beginTransaction();
-            
+
             try {
                 // Quitar predeterminado de otros modelos del mismo tipo
                 $stmtUpdate = $db->prepare("
@@ -304,7 +321,7 @@ class IAModelosService
                 ");
                 $stmtUpdate->bindParam(':tipo_codigo', $modelo['tipo_codigo']);
                 $stmtUpdate->execute();
-                
+
                 // Establecer como predeterminado
                 $stmtSet = $db->prepare("
                     UPDATE ia_modelos
@@ -313,19 +330,17 @@ class IAModelosService
                 ");
                 $stmtSet->bindParam(':id', $id);
                 $stmtSet->execute();
-                
+
                 $db->commit();
-                
+
                 responderJSON([
                     'success' => true,
                     'message' => 'Modelo establecido como predeterminado'
                 ]);
-                
             } catch (Exception $e) {
                 $db->rollBack();
                 throw $e;
             }
-            
         } catch (Exception $e) {
             error_log("Error estableciendo modelo predeterminado: " . $e->getMessage());
             responderJSON(['error' => 'Error al actualizar configuración'], 500);
@@ -339,19 +354,19 @@ class IAModelosService
     {
         try {
             $db = Flight::db();
-            
+
             // Calcular costo
             $costo = 0;
             if ($modeloConfig['costo_por_1k_tokens'] > 0) {
                 $costo = ($tokensUsados / 1000) * $modeloConfig['costo_por_1k_tokens'];
             }
-            
+
             // Para modelos de transcripción, si tienen costo por minuto
             if (isset($modeloConfig['configuracion']['costo_por_minuto'])) {
                 $duracionMinutos = $tokensUsados / 150; // Estimación: 150 palabras por minuto
                 $costo = $duracionMinutos * $modeloConfig['configuracion']['costo_por_minuto'];
             }
-            
+
             $stmt = $db->prepare("
                 INSERT INTO ia_modelos_uso (
                     modelo_config_id,
@@ -367,13 +382,12 @@ class IAModelosService
                     1
                 )
             ");
-            
+
             $stmt->bindParam(':modelo_id', $modeloId);
             $stmt->bindParam(':actividad_id', $actividadId);
             $stmt->bindParam(':tokens', $tokensUsados);
             $stmt->bindParam(':costo', $costo);
             $stmt->execute();
-            
         } catch (Exception $e) {
             error_log("Error registrando uso de modelo: " . $e->getMessage());
             // No lanzamos excepción para no interrumpir el proceso principal
