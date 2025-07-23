@@ -1,6 +1,30 @@
 <?php
 // index.php - Punto de entrada de la API
+
+// DEBUGGING - Logs para ver qué está pasando
+error_log("=== INICIO REQUEST ===");
+error_log("REQUEST_METHOD: " . ($_SERVER['REQUEST_METHOD'] ?? 'NO DEFINIDO'));
+error_log("REQUEST_URI: " . ($_SERVER['REQUEST_URI'] ?? 'NO DEFINIDO'));
+error_log("HTTP_ORIGIN: " . ($_SERVER['HTTP_ORIGIN'] ?? 'NO DEFINIDO'));
+error_log("CONTENT_TYPE: " . ($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? 'NO DEFINIDO'));
+
 require 'vendor/autoload.php';
+
+// Configurar CORS INMEDIATAMENTE - Antes de Flight
+header('Access-Control-Allow-Origin: *');
+error_log("CORS header establecido: Access-Control-Allow-Origin: *");
+
+header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-API-KEY');
+header('Access-Control-Allow-Credentials: true');
+header('Access-Control-Max-Age: 86400');
+
+// Manejar petición OPTIONS inmediatamente
+if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
+    error_log("Petición OPTIONS recibida - respondiendo 200");
+    http_response_code(200);
+    exit();
+}
 
 // Función para convertir strings numéricas a números en arrays
 function convertirNumerosEnArray(&$array) {
@@ -28,7 +52,6 @@ function responderJSON($data, $code = 200) {
     
     // Usar Flight::json en lugar de manejar la respuesta manualmente
     Flight::json($data, $code);
-   
 }
 
 // Middleware para interceptar y convertir datos de entrada JSON
@@ -89,7 +112,7 @@ require 'config.php';
 // Cargar servicios automáticamente
 // IMPORTANTE: Ordenar para que audit.service.php se cargue primero
 $services = glob(__DIR__ . '/services/*.service.php');
-sort($services); // Esto asegura que audit.service.php se cargue antes que auth.service.php
+sort($services);
 foreach ($services as $serviceFile) {
     require_once $serviceFile;
 }
@@ -108,9 +131,9 @@ Flight::route('GET /', function(){
     Flight::json(array(
         'message' => 'API Secretaría v1.0',
         'status' => 'OK',
-        'version' => 1.0,  // Esto se convertirá a número
-        'test_number' => "123", // Esto también se convertirá a número
-        'test_string' => "password" // Esto permanecerá como string
+        'version' => 1.0,
+        'test_number' => "123",
+        'test_string' => "password"
     ));
 });
 
