@@ -174,7 +174,7 @@ class IAModelosService
 
             try {
                 // Guardar audio temporalmente
-                $audioInfo = $storage->guardarArchivo($audioFile, 'temp', 'transcripciones');
+                $audioInfo = $storage->guardarArchivo($audioFile, 'temp', 'audio');
 
                 // Obtener el archivo para transcribir
                 $archivoData = $storage->obtenerArchivo($audioInfo['path']);
@@ -194,7 +194,7 @@ class IAModelosService
 
                 // Limpiar archivo temporal del storage
                 $storage->eliminarArchivo($audioInfo['path']);
-
+                $storage->limpiezaProbabilistica(10); // 10% de probabilidad de limpiar
                 responderJSON([
                     'success' => true,
                     'texto' => $resultado['texto'],

@@ -1,8 +1,14 @@
 <?php
-// providers/ai/AIProviderInterface.php
-
 interface AIProviderInterface
 {
+    /**
+     * Transcribir audio a texto
+     * @param string $audioPath Ruta al archivo de audio
+     * @param array $configuracion Configuración adicional del modelo
+     * @return array Array con texto transcrito e información adicional
+     */
+    public function transcribirAudio(string $audioPath, array $configuracion = []): array;
+    
     /**
      * Generar embeddings para búsqueda semántica
      * @param string $texto Texto a procesar

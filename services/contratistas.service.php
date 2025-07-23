@@ -10,8 +10,6 @@ class ContratistasService
             requireAuth();
             $currentUser = Flight::get('currentUser');
 
-            error_log("Usuario actual: " . json_encode($currentUser));
-
             // Verificar que el usuario existe
             if (!$currentUser || !isset($currentUser['id'])) {
                 error_log("No se encontró usuario actual");
@@ -21,7 +19,6 @@ class ContratistasService
 
             // Verificar permisos
             if (!AuthService::checkPermission($currentUser['id'], 'contratos.gestionar')) {
-                error_log("Usuario sin permisos para contratos.gestionar");
                 responderJSON(['error' => 'No tiene permisos para ver contratistas'], 403);
                 return;
             }
@@ -52,7 +49,6 @@ class ContratistasService
             if (!is_array($contratistas)) {
                 $contratistas = [];
             }
-            error_log("Contratistas encontrados: " . count($contratistas));
 
             responderJSON($contratistas);
         } catch (Exception $e) {

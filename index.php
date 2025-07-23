@@ -1,19 +1,8 @@
 <?php
-// index.php - Punto de entrada de la API
-
-// DEBUGGING - Logs para ver qué está pasando
-error_log("=== INICIO REQUEST ===");
-error_log("REQUEST_METHOD: " . ($_SERVER['REQUEST_METHOD'] ?? 'NO DEFINIDO'));
-error_log("REQUEST_URI: " . ($_SERVER['REQUEST_URI'] ?? 'NO DEFINIDO'));
-error_log("HTTP_ORIGIN: " . ($_SERVER['HTTP_ORIGIN'] ?? 'NO DEFINIDO'));
-error_log("CONTENT_TYPE: " . ($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? 'NO DEFINIDO'));
-
 require 'vendor/autoload.php';
 
 // Configurar CORS INMEDIATAMENTE - Antes de Flight
 header('Access-Control-Allow-Origin: *');
-error_log("CORS header establecido: Access-Control-Allow-Origin: *");
-
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-API-KEY');
 header('Access-Control-Allow-Credentials: true');
@@ -21,7 +10,6 @@ header('Access-Control-Max-Age: 86400');
 
 // Manejar petición OPTIONS inmediatamente
 if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
-    error_log("Petición OPTIONS recibida - respondiendo 200");
     http_response_code(200);
     exit();
 }

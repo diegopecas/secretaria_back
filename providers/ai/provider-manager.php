@@ -3,8 +3,7 @@
 
 require_once __DIR__ . '/ai-provider.interface.php';
 require_once __DIR__ . '/gemini.provider.php';
-// require_once __DIR__ . '/openai.provider.php'; // Cuando se implemente
-// require_once __DIR__ . '/anthropic.provider.php'; // Cuando se implemente
+require_once __DIR__ . '/openai.provider.php'; // NUEVA LÍNEA
 
 class ProviderManager
 {
@@ -38,7 +37,6 @@ class ProviderManager
         if (!empty($geminiKey)) {
             try {
                 $this->providers['gemini'] = new GeminiProvider($geminiKey);
-                error_log("Provider Gemini inicializado correctamente");
             } catch (Exception $e) {
                 error_log("Error inicializando Gemini: " . $e->getMessage());
             }
@@ -46,15 +44,16 @@ class ProviderManager
             error_log("Gemini API key no configurada en la base de datos");
         }
 
-        // OpenAI
+        // OpenAI - ACTUALIZADO
         $openaiKey = $configIA['openai_api_key']['valor'] ?? '';
         if (!empty($openaiKey)) {
             try {
-                // $this->providers['openai'] = new OpenAIProvider($openaiKey);
-                error_log("Provider OpenAI pendiente de implementación");
+                $this->providers['openai'] = new OpenAIProvider($openaiKey); 
             } catch (Exception $e) {
                 error_log("Error inicializando OpenAI: " . $e->getMessage());
             }
+        } else {
+            error_log("OpenAI API key no configurada en la base de datos");
         }
 
         // Anthropic
@@ -94,6 +93,16 @@ class ProviderManager
     }
 
     /**
+     * Reinicializar providers (útil cuando se cambian API keys)
+     */
+    public function reinitialize(): void
+    {
+        $this->providers = [];
+        $this->initializeProviders();
+        $this->syncModelAvailability();
+    }
+
+    /**
      * Actualizar disponibilidad de modelos en la BD según providers configurados
      */
     public function syncModelAvailability(): void
@@ -101,7 +110,7 @@ class ProviderManager
         try {
             // Primero, desactivar todos los modelos de IA (excepto navegador)
             $stmt = $this->db->prepare("
-                UPDATE ia_modelos_config 
+                UPDATE ia_modelos 
                 SET activo = 0 
                 WHERE proveedor != 'navegador'
             ");
@@ -113,20 +122,18 @@ class ProviderManager
             if (!empty($providersDisponibles)) {
                 $placeholders = array_fill(0, count($providersDisponibles), '?');
                 $sql = "
-                    UPDATE ia_modelos_config 
+                    UPDATE ia_modelos 
                     SET activo = 1 
                     WHERE proveedor IN (" . implode(',', $placeholders) . ")
                 ";
 
                 $stmt = $this->db->prepare($sql);
                 $stmt->execute($providersDisponibles);
-
-                error_log("Modelos activados para providers: " . implode(', ', $providersDisponibles));
             }
 
             // Siempre mantener activo el modelo del navegador
             $stmt = $this->db->prepare("
-                UPDATE ia_modelos_config 
+                UPDATE ia_modelos 
                 SET activo = 1 
                 WHERE proveedor = 'navegador'
             ");
@@ -155,11 +162,9 @@ class ProviderManager
                 return $this->transcribirConGemini($provider, $audioPath, $modeloConfig);
 
             case 'openai':
-                // return $this->transcribirConOpenAI($provider, $audioPath, $modeloConfig);
-                throw new Exception("OpenAI aún no está implementado");
+                return $this->transcribirConOpenAI($provider, $audioPath, $modeloConfig);
 
             case 'anthropic':
-                // return $this->transcribirConAnthropic($provider, $audioPath, $modeloConfig);
                 throw new Exception("Anthropic aún no está implementado");
 
             default:
@@ -168,24 +173,36 @@ class ProviderManager
     }
 
     /**
-     * Transcribir con Gemini
+     * Transcribir con OpenAI Whisper
+     */
+    private function transcribirConOpenAI($provider, $audioPath, $modeloConfig): array
+    {
+        // Parsear configuración JSON si existe
+        $configuracion = [];
+        if (isset($modeloConfig['configuracion_json'])) {
+            $configuracion = json_decode($modeloConfig['configuracion_json'], true) ?? [];
+        }
+
+        // Verificar tamaño del archivo
+        $fileSize = filesize($audioPath);
+        $maxSize = ($configuracion['max_file_size_mb'] ?? 25) * 1024 * 1024;
+        
+        if ($fileSize > $maxSize) {
+            throw new Exception("El archivo excede el tamaño máximo permitido de 25MB");
+        }
+
+        // WebM es soportado directamente por Whisper, no necesitamos convertir
+        // Simplemente llamar al método del provider
+        return $provider->transcribirAudio($audioPath, $configuracion);
+    }
+
+    /**
+     * Transcribir con Gemini (placeholder)
      */
     private function transcribirConGemini($provider, $audioPath, $modeloConfig): array
     {
-        // Por ahora retornar transcripción de prueba
-        // TODO: Implementar transcripción real cuando tengamos el método en GeminiProvider
-
-        $duracionSegundos = 60; // Estimado para pruebas
-
-        return [
-            'texto' => "Esta es una transcripción de prueba usando Gemini. En producción aquí aparecería el texto real transcrito del audio.",
-            'duracion_segundos' => $duracionSegundos,
-            'tokens_usados' => $duracionSegundos * 10, // Estimación
-            'confianza' => 0.95
-        ];
-
-        // Cuando esté implementado en GeminiProvider:
-        // return $provider->transcribirAudio($audioPath);
+        // Gemini no soporta transcripción directa de audio actualmente
+        throw new Exception("Gemini no soporta transcripción de audio. Use OpenAI Whisper o Web Speech API.");
     }
 
     /**

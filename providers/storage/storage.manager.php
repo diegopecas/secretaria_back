@@ -9,18 +9,19 @@ class StorageManager
     private static $instance = null;
     private $driver;
     private $config;
-    
+
     // Configuración de tipos de archivo permitidos
     private $allowedExtensions = [
         'documento' => ['pdf', 'doc', 'docx', 'txt', 'odt'],
         'imagen' => ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'],
         'hoja_calculo' => ['xls', 'xlsx', 'csv', 'ods'],
         'presentacion' => ['ppt', 'pptx', 'odp'],
-        'transcripcion' => ['txt', 'doc', 'docx', 'pdf']
+        'transcripcion' => ['txt', 'doc', 'docx', 'pdf'],
+        'audio' => ['webm', 'mp3', 'wav', 'ogg', 'mpeg', 'm4a', 'mp4'] // NUEVA CATEGORÍA
     ];
-    
+
     private $maxFileSize = 10 * 1024 * 1024; // 10MB
-    
+
     private function __construct()
     {
         // Cargar configuración
@@ -37,10 +38,10 @@ class StorageManager
                 'secret_key' => $_ENV['S3_SECRET_KEY'] ?? ''
             ]
         ];
-        
+
         $this->initializeDriver();
     }
-    
+
     /**
      * Obtener instancia única (Singleton)
      */
@@ -51,7 +52,7 @@ class StorageManager
         }
         return self::$instance;
     }
-    
+
     /**
      * Inicializar el driver de storage
      */
@@ -64,14 +65,14 @@ class StorageManager
                 // $this->driver = new S3Storage($this->config['s3']);
                 throw new Exception('S3 Storage aún no implementado');
                 break;
-                
+
             case 'local':
             default:
                 $this->driver = new LocalStorage($this->config['local']);
                 break;
         }
     }
-    
+
     /**
      * Obtener el driver actual
      */
@@ -79,7 +80,7 @@ class StorageManager
     {
         return $this->driver;
     }
-    
+
     /**
      * Guardar archivo con validaciones completas
      * @param array $file Archivo desde $_FILES
@@ -91,38 +92,37 @@ class StorageManager
     {
         // 1. Validar el archivo
         $this->validarArchivo($file);
-        
+
         // 2. Generar nombre único y path
         $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
         $nombreUnico = $this->generarNombreUnico($extension);
-        
+
         // Construir path: categoria/año/mes/[subfolder]/archivo
         $pathParts = [$categoria, date('Y'), date('m')];
         if ($subfolder) {
             $pathParts[] = $subfolder;
         }
         $pathParts[] = $nombreUnico;
-        
+
         $path = implode('/', $pathParts);
-        
+
         // 3. Guardar usando el driver
         try {
             $resultado = $this->driver->guardar($file, $path);
-            
+
             // 4. Agregar información adicional
             $resultado['nombre_original'] = $file['name'];
             $resultado['tipo_archivo'] = $this->detectarTipoArchivo($extension);
             $resultado['mime_type'] = $file['type'];
             $resultado['extension'] = $extension;
-            
+
             return $resultado;
-            
         } catch (Exception $e) {
             error_log("Error al guardar archivo: " . $e->getMessage());
             throw new Exception('Error al guardar el archivo: ' . $e->getMessage());
         }
     }
-    
+
     /**
      * Obtener archivo
      */
@@ -130,7 +130,7 @@ class StorageManager
     {
         return $this->driver->obtener($path);
     }
-    
+
     /**
      * Eliminar archivo
      */
@@ -138,7 +138,7 @@ class StorageManager
     {
         return $this->driver->eliminar($path);
     }
-    
+
     /**
      * Obtener URL pública del archivo
      */
@@ -146,7 +146,7 @@ class StorageManager
     {
         return $this->driver->getUrl($path);
     }
-    
+
     /**
      * Validar archivo antes de guardar
      */
@@ -156,24 +156,24 @@ class StorageManager
         if ($file['error'] !== UPLOAD_ERR_OK) {
             throw new Exception($this->getUploadErrorMessage($file['error']));
         }
-        
+
         // Verificar tamaño
         if ($file['size'] > $this->maxFileSize) {
             throw new Exception('El archivo excede el tamaño máximo permitido (10MB)');
         }
-        
+
         // Verificar extensión
         $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
         if (!$this->esExtensionPermitida($extension)) {
             throw new Exception('Tipo de archivo no permitido: .' . $extension);
         }
-        
+
         // Verificar seguridad (MIME type)
         if (!$this->esArchivoSeguro($file['tmp_name'])) {
             throw new Exception('El archivo no pasó las validaciones de seguridad');
         }
     }
-    
+
     /**
      * Verificar si la extensión está permitida
      */
@@ -186,7 +186,7 @@ class StorageManager
         }
         return false;
     }
-    
+
     /**
      * Detectar tipo de archivo por extensión
      */
@@ -199,14 +199,14 @@ class StorageManager
         }
         return 'otro';
     }
-    
+
     /**
      * Validar seguridad del archivo
      */
     private function esArchivoSeguro(string $rutaArchivo): bool
     {
         $mimeType = mime_content_type($rutaArchivo);
-        
+
         // Lista negra de MIME types peligrosos
         $blacklist = [
             'application/x-httpd-php',
@@ -218,10 +218,10 @@ class StorageManager
             'application/x-elf',
             'application/x-mach-binary'
         ];
-        
+
         return !in_array($mimeType, $blacklist);
     }
-    
+
     /**
      * Generar nombre único para el archivo
      */
@@ -234,7 +234,7 @@ class StorageManager
             $extension
         );
     }
-    
+
     /**
      * Obtener mensaje de error de upload
      */
@@ -249,10 +249,10 @@ class StorageManager
             UPLOAD_ERR_CANT_WRITE => 'Error al escribir el archivo en el disco',
             UPLOAD_ERR_EXTENSION => 'Una extensión de PHP detuvo la subida del archivo',
         ];
-        
+
         return $errors[$errorCode] ?? 'Error desconocido al subir el archivo';
     }
-    
+
     /**
      * Obtener tamaño máximo permitido
      */
@@ -260,7 +260,7 @@ class StorageManager
     {
         return $this->maxFileSize;
     }
-    
+
     /**
      * Obtener extensiones permitidas
      */
@@ -271,5 +271,55 @@ class StorageManager
             $todas = array_merge($todas, $extensiones);
         }
         return array_unique($todas);
+    }
+
+
+    /**
+     * Limpiar archivos temporales antiguos
+     * @param string $directorio Directorio a limpiar
+     * @param string $patron Patrón de archivos (ej: 'debug_audio_*.webm')
+     * @param int $diasAntiguedad Eliminar archivos más antiguos que X días
+     * @return int Número de archivos eliminados
+     */
+    public function limpiarArchivosTemporales($directorio = 'uploads', $patron = 'debug_audio_*.webm', $diasAntiguedad = 1)
+    {
+        $archivosEliminados = 0;
+        $rutaCompleta = $this->config['local']['base_path'] . $directorio . '/';
+
+        // Buscar archivos que coincidan con el patrón
+        $archivos = glob($rutaCompleta . $patron);
+
+        if ($archivos === false) {
+            return 0;
+        }
+
+        $tiempoLimite = time() - ($diasAntiguedad * 24 * 60 * 60);
+
+        foreach ($archivos as $archivo) {
+            // Verificar edad del archivo
+            if (file_exists($archivo) && filemtime($archivo) < $tiempoLimite) {
+                if (unlink($archivo)) {
+                    $archivosEliminados++;
+                    error_log("Archivo temporal eliminado: " . basename($archivo));
+                }
+            }
+        }
+
+        return $archivosEliminados;
+    }
+
+    /**
+     * Ejecutar limpieza con probabilidad (para no hacerlo siempre)
+     * @param int $probabilidad Probabilidad de ejecutar (1-100)
+     */
+    public function limpiezaProbabilistica($probabilidad = 10)
+    {
+        // Solo ejecutar con X% de probabilidad para no afectar rendimiento
+        if (rand(1, 100) <= $probabilidad) {
+            // Limpiar diferentes tipos de archivos temporales
+            $this->limpiarArchivosTemporales('uploads', 'debug_audio_*.webm', 1);
+            $this->limpiarArchivosTemporales('temp', 'audio_*.tmp', 1);
+            $this->limpiarArchivosTemporales('temp/transcripciones', '*.webm', 7);
+        }
     }
 }
