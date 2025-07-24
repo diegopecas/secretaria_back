@@ -13,27 +13,27 @@ class ChatService
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             $data = Flight::request()->data->getData();
             $contrato_id = $data['contrato_id'] ?? null;
             $pregunta = $data['pregunta'] ?? null;
             $continuar_sesion = $data['continuar_sesion'] ?? false;
             $sesion_id = $data['sesion_id'] ?? null;
-            
+
             if (!$contrato_id || !$pregunta) {
                 responderJSON(['error' => 'Contrato y pregunta son requeridos'], 400);
                 return;
             }
-            
+
             // Verificar acceso al contrato
             if (!self::verificarAccesoContrato($currentUser['id'], $contrato_id)) {
                 responderJSON(['error' => 'No tiene acceso a este contrato'], 403);
                 return;
             }
-            
+
             $db = Flight::db();
             $db->beginTransaction();
-            
+
             try {
                 // Crear o recuperar sesión
                 if ($continuar_sesion && $sesion_id) {
@@ -44,33 +44,33 @@ class ChatService
                 } else {
                     $sesion_id = self::crearNuevaSesion($currentUser['id'], $contrato_id, $pregunta);
                 }
-                
+
                 // Obtener historial de la sesión
                 $historial = self::obtenerHistorial($sesion_id);
-                
+
                 // Realizar búsqueda semántica
                 $resultadosBusqueda = EmbeddingsService::busquedaSemantica($pregunta, $contrato_id);
-                
+
                 // Construir contexto
                 $contexto = self::construirContextoCompleto($contrato_id, $resultadosBusqueda);
-                
+
                 // Construir mensajes para la IA
                 $messages = self::construirMensajes($historial, $contexto, $pregunta);
-                
+
                 // Guardar pregunta del usuario
                 self::guardarMensaje($sesion_id, 'user', $pregunta);
-                
+
                 // Consultar a GPT-4
                 $respuestaIA = self::consultarIA($messages);
-                
+
                 // Guardar respuesta de la IA
                 self::guardarMensaje($sesion_id, 'assistant', $respuestaIA['contenido'], $respuestaIA['tokens']);
-                
+
                 // Actualizar estadísticas de la sesión
                 self::actualizarEstadisticasSesion($sesion_id);
-                
+
                 $db->commit();
-                
+
                 responderJSON([
                     'success' => true,
                     'sesion_id' => $sesion_id,
@@ -79,18 +79,163 @@ class ChatService
                     'tokens_usados' => $respuestaIA['tokens'],
                     'puede_continuar' => true
                 ]);
-                
             } catch (Exception $e) {
                 $db->rollBack();
                 throw $e;
             }
-            
         } catch (Exception $e) {
             error_log("Error en chat: " . $e->getMessage());
             responderJSON(['error' => 'Error al procesar conversación'], 500);
         }
     }
-    
+
+    /**
+     * Iniciar conversación con streaming
+     */
+    public static function iniciarConversacionStream()
+    {
+        // CRÍTICO: Configurar headers SSE INMEDIATAMENTE
+        header('Content-Type: text/event-stream');
+        header('Cache-Control: no-cache');
+        header('Connection: keep-alive');
+        header('Access-Control-Allow-Origin: http://localhost:4200');
+        header('Access-Control-Allow-Credentials: true');
+        header('X-Accel-Buffering: no'); // Para nginx
+
+        // Deshabilitar buffering ANTES de cualquier salida
+        @ob_end_clean();
+        @ob_implicit_flush(true);
+        @ini_set('output_buffering', 'off');
+        @ini_set('zlib.output_compression', false);
+        
+        // Flush inicial para establecer la conexión
+        echo ":ok\n\n";
+        flush();
+
+        try {
+            error_log("=== INICIO ChatService::iniciarConversacionStream ===");
+            
+            // Verificar autenticación por token en query
+            $token = $_GET['token'] ?? null;
+            error_log("Token recibido: " . ($token ? substr($token, 0, 20) . '...' : 'NO TOKEN'));
+            
+            if (!$token) {
+                error_log("ERROR: No se proporcionó token");
+                self::enviarEventoSSE('error', ['message' => 'Token no proporcionado']);
+                exit();
+            }
+
+            // Verificar token manualmente usando la función global validateToken
+            $user = validateToken($token);
+            
+            if (!$user) {
+                error_log("ERROR: Token inválido");
+                self::enviarEventoSSE('error', ['message' => 'Token inválido']);
+                exit();
+            }
+
+            error_log("Token válido, usuario ID: " . $user['id']);
+            error_log("Usuario: " . $user['nombre']);
+
+            // La función validateToken ya devuelve la información del usuario
+            Flight::set('currentUser', $user);
+            $currentUser = $user;
+
+            // Obtener datos de GET
+            $contrato_id = $_GET['contrato_id'] ?? null;
+            $pregunta = urldecode($_GET['pregunta'] ?? '');
+            $continuar_sesion = $_GET['continuar_sesion'] === 'true';
+            $sesion_id = $_GET['sesion_id'] ?? null;
+
+            error_log("Parámetros recibidos:");
+            error_log("- contrato_id: " . $contrato_id);
+            error_log("- pregunta: " . $pregunta);
+            error_log("- continuar_sesion: " . ($continuar_sesion ? 'true' : 'false'));
+            error_log("- sesion_id: " . $sesion_id);
+
+            if (!$contrato_id || !$pregunta) {
+                error_log("ERROR: Datos faltantes - contrato_id o pregunta");
+                self::enviarEventoSSE('error', ['message' => 'Contrato y pregunta son requeridos']);
+                exit();
+            }
+
+            // Verificar acceso al contrato
+            if (!self::verificarAccesoContrato($currentUser['id'], $contrato_id)) {
+                error_log("ERROR: Usuario sin acceso al contrato");
+                self::enviarEventoSSE('error', ['message' => 'No tiene acceso a este contrato']);
+                exit();
+            }
+
+            error_log("Acceso al contrato verificado");
+
+            // Crear o recuperar sesión
+            if ($continuar_sesion && $sesion_id && $sesion_id !== 'null' && $sesion_id !== '') {
+                $sesion = self::obtenerSesion($sesion_id, $currentUser['id']);
+                if (!$sesion || $sesion['contrato_id'] != $contrato_id) {
+                    $sesion_id = self::crearNuevaSesion($currentUser['id'], $contrato_id, $pregunta);
+                    error_log("Sesión anterior no válida, creada nueva: " . $sesion_id);
+                } else {
+                    error_log("Continuando sesión existente: " . $sesion_id);
+                }
+            } else {
+                $sesion_id = self::crearNuevaSesion($currentUser['id'], $contrato_id, $pregunta);
+                error_log("Nueva sesión creada: " . $sesion_id);
+            }
+
+            // Enviar ID de sesión
+            self::enviarEventoSSE('session', ['sesion_id' => $sesion_id]);
+
+            // Obtener historial
+            $historial = self::obtenerHistorial($sesion_id);
+            error_log("Mensajes en historial: " . count($historial));
+
+            // Realizar búsqueda semántica
+            self::enviarEventoSSE('status', ['message' => 'Buscando información relevante...']);
+
+            require_once __DIR__ . '/embeddings.service.php';
+            $resultadosBusqueda = EmbeddingsService::busquedaSemantica($pregunta, $contrato_id);
+            error_log("Resultados de búsqueda: " . $resultadosBusqueda['total_resultados'] . " elementos");
+
+            // Construir contexto
+            $contexto = self::construirContextoCompleto($contrato_id, $resultadosBusqueda);
+
+            // Construir mensajes
+            $messages = self::construirMensajes($historial, $contexto, $pregunta);
+
+            // Guardar pregunta del usuario
+            self::guardarMensaje($sesion_id, 'user', $pregunta);
+
+            // Enviar fuentes encontradas
+            if (!empty($resultadosBusqueda['actividades'])) {
+                self::enviarEventoSSE('sources', [
+                    'actividades' => array_slice($resultadosBusqueda['actividades'], 0, 5)
+                ]);
+            }
+
+            // Consultar a GPT-4 con streaming
+            self::enviarEventoSSE('status', ['message' => 'Generando respuesta...']);
+            error_log("Iniciando consulta a GPT-4...");
+            
+            self::consultarIAStreaming($messages, $sesion_id);
+
+            // Actualizar estadísticas
+            self::actualizarEstadisticasSesion($sesion_id);
+
+            // Enviar evento de finalización
+            self::enviarEventoSSE('done', ['success' => true]);
+            
+            error_log("=== FIN ChatService::iniciarConversacionStream ===");
+            
+        } catch (Exception $e) {
+            error_log("ERROR CRÍTICO en chat streaming: " . $e->getMessage());
+            error_log("Stack trace: " . $e->getTraceAsString());
+            self::enviarEventoSSE('error', ['message' => 'Error al procesar conversación: ' . $e->getMessage()]);
+        } finally {
+            // Cerrar conexión
+            exit();
+        }
+    }
+
     /**
      * Obtener historial de conversación
      */
@@ -99,23 +244,23 @@ class ChatService
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             $sesion_id = Flight::request()->query['sesion_id'] ?? null;
-            
+
             if (!$sesion_id) {
                 responderJSON(['error' => 'Sesión ID requerida'], 400);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             // Verificar que la sesión pertenece al usuario
             $sesion = self::obtenerSesion($sesion_id, $currentUser['id']);
             if (!$sesion) {
                 responderJSON(['error' => 'Sesión no encontrada'], 404);
                 return;
             }
-            
+
             // Obtener mensajes
             $stmt = $db->prepare("
                 SELECT 
@@ -131,19 +276,18 @@ class ChatService
             $stmt->bindParam(':sesion_id', $sesion_id);
             $stmt->execute();
             $mensajes = $stmt->fetchAll();
-            
+
             responderJSON([
                 'success' => true,
                 'sesion' => $sesion,
                 'mensajes' => $mensajes
             ]);
-            
         } catch (Exception $e) {
             error_log("Error obteniendo historial: " . $e->getMessage());
             responderJSON(['error' => 'Error al obtener historial'], 500);
         }
     }
-    
+
     /**
      * Listar sesiones de chat del usuario
      */
@@ -152,11 +296,11 @@ class ChatService
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             $contrato_id = Flight::request()->query['contrato_id'] ?? null;
-            
+
             $db = Flight::db();
-            
+
             $sql = "SELECT 
                     s.id,
                     s.titulo,
@@ -171,31 +315,30 @@ class ChatService
                 INNER JOIN entidades e ON c.entidad_id = e.id
                 WHERE s.usuario_id = :usuario_id
                 AND s.activa = 1";
-            
+
             $params = [':usuario_id' => $currentUser['id']];
-            
+
             if ($contrato_id) {
                 $sql .= " AND s.contrato_id = :contrato_id";
                 $params[':contrato_id'] = $contrato_id;
             }
-            
+
             $sql .= " ORDER BY s.fecha_ultimo_mensaje DESC LIMIT 20";
-            
+
             $stmt = $db->prepare($sql);
             $stmt->execute($params);
             $sesiones = $stmt->fetchAll();
-            
+
             responderJSON([
                 'success' => true,
                 'sesiones' => $sesiones
             ]);
-            
         } catch (Exception $e) {
             error_log("Error listando sesiones: " . $e->getMessage());
             responderJSON(['error' => 'Error al listar sesiones'], 500);
         }
     }
-    
+
     /**
      * Generar resumen de contrato (para contexto base)
      */
@@ -204,21 +347,21 @@ class ChatService
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             if (!AuthService::checkPermission($currentUser['id'], 'contratos.gestionar')) {
                 responderJSON(['error' => 'No tiene permisos'], 403);
                 return;
             }
-            
+
             $contrato_id = Flight::request()->data['contrato_id'] ?? null;
-            
+
             if (!$contrato_id) {
                 responderJSON(['error' => 'Contrato ID requerido'], 400);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             // Obtener información del contrato
             $stmt = $db->prepare("
                 SELECT 
@@ -233,12 +376,12 @@ class ChatService
             $stmt->bindParam(':contrato_id', $contrato_id);
             $stmt->execute();
             $contrato = $stmt->fetch();
-            
+
             if (!$contrato) {
                 responderJSON(['error' => 'Contrato no encontrado'], 404);
                 return;
             }
-            
+
             // Obtener obligaciones
             $stmt = $db->prepare("
                 SELECT numero_obligacion, descripcion
@@ -249,7 +392,7 @@ class ChatService
             $stmt->bindParam(':contrato_id', $contrato_id);
             $stmt->execute();
             $obligaciones = $stmt->fetchAll();
-            
+
             // Obtener resumen de actividades
             $stmt = $db->prepare("
                 SELECT 
@@ -262,10 +405,10 @@ class ChatService
             $stmt->bindParam(':contrato_id', $contrato_id);
             $stmt->execute();
             $estadisticas = $stmt->fetch();
-            
+
             // Generar resumen con IA
             $prompt = self::construirPromptResumen($contrato, $obligaciones, $estadisticas);
-            
+
             $messages = [
                 [
                     'role' => 'system',
@@ -276,9 +419,9 @@ class ChatService
                     'content' => $prompt
                 ]
             ];
-            
+
             $respuesta = self::consultarIA($messages);
-            
+
             // Guardar resumen
             $stmt = $db->prepare("
                 UPDATE contratos 
@@ -289,28 +432,27 @@ class ChatService
             $stmt->bindParam(':resumen', $respuesta['contenido']);
             $stmt->bindParam(':contrato_id', $contrato_id);
             $stmt->execute();
-            
+
             responderJSON([
                 'success' => true,
                 'resumen' => $respuesta['contenido'],
                 'tokens_usados' => $respuesta['tokens']
             ]);
-            
         } catch (Exception $e) {
             error_log("Error generando resumen: " . $e->getMessage());
             responderJSON(['error' => 'Error al generar resumen'], 500);
         }
     }
-    
+
     // MÉTODOS PRIVADOS AUXILIARES
-    
+
     /**
      * Verificar acceso al contrato
      */
     private static function verificarAccesoContrato($usuarioId, $contratoId)
     {
         $db = Flight::db();
-        
+
         // Verificar si es contratista
         $stmt = $db->prepare("
             SELECT COUNT(*) as es_contratista
@@ -320,7 +462,7 @@ class ChatService
         $stmt->bindParam(':usuario_id', $usuarioId);
         $stmt->execute();
         $result = $stmt->fetch();
-        
+
         if ($result['es_contratista'] > 0) {
             // Si es contratista, verificar acceso específico
             $stmt = $db->prepare("
@@ -333,24 +475,24 @@ class ChatService
             $stmt->bindParam(':usuario_id', $usuarioId);
             $stmt->execute();
             $acceso = $stmt->fetch();
-            
+
             return $acceso['tiene_acceso'] > 0;
         }
-        
+
         // Si no es contratista, tiene acceso a todos
         return true;
     }
-    
+
     /**
      * Crear nueva sesión de chat
      */
     private static function crearNuevaSesion($usuarioId, $contratoId, $primeraPregunta)
     {
         $db = Flight::db();
-        
+
         $sesionId = uniqid('chat_', true);
         $titulo = substr($primeraPregunta, 0, 100) . '...';
-        
+
         $stmt = $db->prepare("
             INSERT INTO chat_sesiones (
                 id,
@@ -370,23 +512,23 @@ class ChatService
                 NOW()
             )
         ");
-        
+
         $stmt->bindParam(':id', $sesionId);
         $stmt->bindParam(':usuario_id', $usuarioId);
         $stmt->bindParam(':contrato_id', $contratoId);
         $stmt->bindParam(':titulo', $titulo);
         $stmt->execute();
-        
+
         return $sesionId;
     }
-    
+
     /**
      * Obtener sesión
      */
     private static function obtenerSesion($sesionId, $usuarioId)
     {
         $db = Flight::db();
-        
+
         $stmt = $db->prepare("
             SELECT * FROM chat_sesiones
             WHERE id = :sesion_id
@@ -396,17 +538,17 @@ class ChatService
         $stmt->bindParam(':sesion_id', $sesionId);
         $stmt->bindParam(':usuario_id', $usuarioId);
         $stmt->execute();
-        
+
         return $stmt->fetch();
     }
-    
+
     /**
      * Obtener historial de mensajes
      */
     private static function obtenerHistorial($sesionId, $limite = 10)
     {
         $db = Flight::db();
-        
+
         // Obtener últimos N mensajes para mantener contexto manejable
         $stmt = $db->prepare("
             SELECT rol, contenido
@@ -420,20 +562,20 @@ class ChatService
         $stmt->bindParam(':sesion_id', $sesionId);
         $stmt->bindParam(':limite', $limite, PDO::PARAM_INT);
         $stmt->execute();
-        
+
         $mensajes = $stmt->fetchAll();
-        
+
         // Invertir para orden cronológico
         return array_reverse($mensajes);
     }
-    
+
     /**
      * Construir contexto completo
      */
     private static function construirContextoCompleto($contratoId, $resultadosBusqueda)
     {
         $db = Flight::db();
-        
+
         // Obtener resumen del contrato si existe
         $stmt = $db->prepare("
             SELECT resumen_ia 
@@ -444,20 +586,20 @@ class ChatService
         $stmt->bindParam(':contrato_id', $contratoId);
         $stmt->execute();
         $contrato = $stmt->fetch();
-        
+
         $contexto = "";
-        
+
         if ($contrato && $contrato['resumen_ia']) {
             $contexto .= "=== RESUMEN DEL CONTRATO ===\n";
             $contexto .= $contrato['resumen_ia'] . "\n\n";
         }
-        
+
         $contexto .= "=== INFORMACIÓN RELEVANTE ENCONTRADA ===\n";
         $contexto .= $resultadosBusqueda['contexto'];
-        
+
         return $contexto;
     }
-    
+
     /**
      * Construir array de mensajes para la IA
      */
@@ -473,7 +615,7 @@ class ChatService
                             Si no encuentras información específica, lo indicas claramente.'
             ]
         ];
-        
+
         // Si no hay historial, agregar el contexto como primer mensaje
         if (empty($historial)) {
             $messages[] = [
@@ -488,43 +630,43 @@ class ChatService
                     'content' => $msg['contenido']
                 ];
             }
-            
+
             // Agregar contexto actualizado
             $messages[] = [
                 'role' => 'system',
                 'content' => "Información adicional relevante para esta pregunta:\n\n" . $contexto
             ];
         }
-        
+
         // Agregar pregunta actual
         $messages[] = [
             'role' => 'user',
             'content' => $preguntaActual
         ];
-        
+
         return $messages;
     }
-    
+
     /**
      * Consultar a la IA
      */
     private static function consultarIA($messages)
     {
         $apiKey = ConfiguracionService::get('openai_api_key', 'ia');
-        
+
         if (!$apiKey) {
             throw new Exception('OpenAI API key no configurada');
         }
-        
+
         $url = 'https://api.openai.com/v1/chat/completions';
-        
+
         $data = [
             'model' => 'gpt-4-turbo-preview',
             'messages' => $messages,
             'temperature' => 0.3,
             'max_tokens' => 1500
         ];
-        
+
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_POST, true);
@@ -534,29 +676,29 @@ class ChatService
             'Authorization: Bearer ' . $apiKey
         ]);
         curl_setopt($ch, CURLOPT_TIMEOUT, 60);
-        
+
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
-        
+
         if ($httpCode !== 200) {
             error_log("Error GPT-4 API: HTTP $httpCode - Response: $response");
             throw new Exception("Error consultando IA");
         }
-        
+
         $resultado = json_decode($response, true);
-        
+
         if (!isset($resultado['choices'][0]['message']['content'])) {
             throw new Exception('Respuesta inválida de GPT-4');
         }
-        
+
         return [
             'contenido' => $resultado['choices'][0]['message']['content'],
             'tokens' => $resultado['usage']['total_tokens'] ?? 0,
             'modelo' => $resultado['model'] ?? 'gpt-4-turbo-preview'
         ];
     }
-    
+
     /**
      * Guardar mensaje en el historial
      */
@@ -564,13 +706,13 @@ class ChatService
     {
         $db = Flight::db();
         $usuarioId = Flight::get('currentUser')['id'];
-        
+
         // Obtener contrato_id de la sesión
         $stmt = $db->prepare("SELECT contrato_id FROM chat_sesiones WHERE id = :sesion_id");
         $stmt->bindParam(':sesion_id', $sesionId);
         $stmt->execute();
         $sesion = $stmt->fetch();
-        
+
         $stmt = $db->prepare("
             INSERT INTO chat_historial (
                 usuario_id,
@@ -592,7 +734,7 @@ class ChatService
                 NOW()
             )
         ");
-        
+
         $stmt->bindParam(':usuario_id', $usuarioId);
         $stmt->bindParam(':contrato_id', $sesion['contrato_id']);
         $stmt->bindParam(':sesion_id', $sesionId);
@@ -601,14 +743,14 @@ class ChatService
         $stmt->bindParam(':tokens', $tokens);
         $stmt->execute();
     }
-    
+
     /**
      * Actualizar estadísticas de la sesión
      */
     private static function actualizarEstadisticasSesion($sesionId)
     {
         $db = Flight::db();
-        
+
         $stmt = $db->prepare("
             UPDATE chat_sesiones 
             SET mensajes_count = (
@@ -624,44 +766,151 @@ class ChatService
                 fecha_ultimo_mensaje = NOW()
             WHERE id = :sesion_id3
         ");
-        
+
         $stmt->bindParam(':sesion_id1', $sesionId);
         $stmt->bindParam(':sesion_id2', $sesionId);
         $stmt->bindParam(':sesion_id3', $sesionId);
         $stmt->execute();
     }
-    
+
     /**
      * Construir prompt para resumen de contrato
      */
     private static function construirPromptResumen($contrato, $obligaciones, $estadisticas)
     {
         $prompt = "Genera un resumen ejecutivo del siguiente contrato:\n\n";
-        
+
         $prompt .= "INFORMACIÓN DEL CONTRATO:\n";
         $prompt .= "- Número: {$contrato['numero_contrato']}\n";
         $prompt .= "- Entidad: {$contrato['entidad_nombre']}\n";
         $prompt .= "- Contratista: {$contrato['contratista_nombre']}\n";
-        $prompt .= "- Objeto: {$contrato['objeto']}\n";
+        $prompt .= "- Objeto: {$contrato['objeto_contrato']}\n";
         $prompt .= "- Valor Total: $" . number_format($contrato['valor_total'], 0, ',', '.') . "\n";
         $prompt .= "- Fecha Inicio: {$contrato['fecha_inicio']}\n";
         $prompt .= "- Fecha Fin: {$contrato['fecha_terminacion']}\n\n";
-        
+
         $prompt .= "OBLIGACIONES CONTRACTUALES:\n";
         foreach ($obligaciones as $obl) {
             $prompt .= "- {$obl['numero_obligacion']}. {$obl['descripcion']}\n";
         }
-        
+
         $prompt .= "\nESTADÍSTICAS:\n";
         $prompt .= "- Total de actividades registradas: {$estadisticas['total_actividades']}\n";
         $prompt .= "- Período de actividades: {$estadisticas['primera_actividad']} a {$estadisticas['ultima_actividad']}\n";
-        
+
         $prompt .= "\nGenera un resumen ejecutivo que incluya:\n";
         $prompt .= "1. Propósito principal del contrato\n";
         $prompt .= "2. Obligaciones clave (resumidas)\n";
         $prompt .= "3. Estado actual de ejecución\n";
         $prompt .= "4. Puntos importantes a tener en cuenta\n";
-        
+
         return $prompt;
+    }
+
+    /**
+     * Consultar IA con streaming
+     */
+    private static function consultarIAStreaming($messages, $sesionId)
+    {
+        $apiKey = ConfiguracionService::get('openai_api_key', 'ia');
+
+        if (!$apiKey) {
+            throw new Exception('OpenAI API key no configurada');
+        }
+
+        $url = 'https://api.openai.com/v1/chat/completions';
+
+        $data = [
+            'model' => 'gpt-4-turbo-preview',
+            'messages' => $messages,
+            'temperature' => 0.3,
+            'max_tokens' => 1500,
+            'stream' => true
+        ];
+
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $apiKey
+        ]);
+        curl_setopt($ch, CURLOPT_WRITEFUNCTION, function ($ch, $data) use ($sesionId) {
+            static $buffer = '';
+            static $contenidoCompleto = '';
+            static $tokensUsados = 0;
+
+            $buffer .= $data;
+
+            // Procesar líneas completas
+            while (($pos = strpos($buffer, "\n")) !== false) {
+                $line = substr($buffer, 0, $pos);
+                $buffer = substr($buffer, $pos + 1);
+
+                // Ignorar líneas vacías
+                if (trim($line) === '') continue;
+
+                // Verificar si es un mensaje de datos
+                if (strpos($line, 'data: ') === 0) {
+                    $jsonData = substr($line, 6);
+
+                    // Verificar si es el mensaje final
+                    if ($jsonData === '[DONE]') {
+                        // Guardar mensaje completo en la BD
+                        if (!empty($contenidoCompleto)) {
+                            self::guardarMensaje($sesionId, 'assistant', $contenidoCompleto, $tokensUsados);
+                        }
+                        continue;
+                    }
+
+                    // Decodificar JSON
+                    $parsed = json_decode($jsonData, true);
+                    if ($parsed && isset($parsed['choices'][0]['delta']['content'])) {
+                        $chunk = $parsed['choices'][0]['delta']['content'];
+                        $contenidoCompleto .= $chunk;
+
+                        // Enviar chunk al cliente
+                        self::enviarEventoSSE('message', ['content' => $chunk]);
+                    }
+
+                    // Actualizar tokens si están disponibles
+                    if (isset($parsed['usage']['total_tokens'])) {
+                        $tokensUsados = $parsed['usage']['total_tokens'];
+                    }
+                }
+            }
+
+            return strlen($data);
+        });
+
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($httpCode !== 200) {
+            error_log("Error GPT-4 API Streaming: HTTP $httpCode");
+            self::enviarEventoSSE('error', ['message' => 'Error consultando IA']);
+        }
+    }
+
+    /**
+     * Enviar evento SSE
+     */
+    private static function enviarEventoSSE($event, $data)
+    {
+        $jsonData = json_encode($data);
+        echo "event: $event\n";
+        echo "data: $jsonData\n\n";
+        
+        // Log para depuración
+        error_log("SSE enviado - evento: $event, datos: " . substr($jsonData, 0, 100) . "...");
+        
+        // Forzar envío inmediato
+        if (ob_get_level() > 0) {
+            ob_flush();
+        }
+        flush();
     }
 }

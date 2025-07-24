@@ -1,6 +1,7 @@
 <?php
 // Iniciar o continuar conversación
 Flight::route('POST /chat/conversar', [ChatService::class, 'iniciarConversacion']);
+Flight::route('GET /chat/conversar-stream', [ChatService::class, 'iniciarConversacionStream']);
 
 // Obtener historial de una conversación
 Flight::route('GET /chat/historial', [ChatService::class, 'obtenerHistorialConversacion']);
