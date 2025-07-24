@@ -105,11 +105,15 @@ class OpenAIProvider implements AIProviderInterface
         ];
     }
     
-    /**
+/**
      * Generar embeddings para búsqueda semántica
      */
     public function generarEmbeddings(string $texto): array
     {
+        error_log("OpenAIProvider::generarEmbeddings() - INICIO");
+        error_log("- API Key presente: " . (!empty($this->apiKey) ? 'SÍ' : 'NO'));
+        error_log("- Texto longitud: " . strlen($texto));
+        
         $url = $this->baseUrl . '/embeddings';
         
         $data = [
@@ -117,18 +121,35 @@ class OpenAIProvider implements AIProviderInterface
             'input' => $texto
         ];
         
-        $response = $this->makeRequest($url, $data);
+        error_log("Enviando request a OpenAI...");
+        error_log("- URL: " . $url);
+        error_log("- Modelo: " . $data['model']);
         
-        if (isset($response['data'][0]['embedding'])) {
-            // Actualizar uso
-            $this->tokensUsados += $response['usage']['total_tokens'] ?? 0;
+        try {
+            $response = $this->makeRequest($url, $data);
             
-            return $response['data'][0]['embedding'];
+            if (isset($response['data'][0]['embedding'])) {
+                $embedding = $response['data'][0]['embedding'];
+                error_log("Embedding recibido exitosamente");
+                error_log("- Dimensiones: " . count($embedding));
+                error_log("- Tokens usados: " . ($response['usage']['total_tokens'] ?? 'N/A'));
+                
+                // Actualizar uso
+                $this->tokensUsados += $response['usage']['total_tokens'] ?? 0;
+                
+                return $embedding;
+            } else {
+                error_log("ERROR: Respuesta no contiene embedding");
+                error_log("Respuesta: " . json_encode($response));
+            }
+            
+        } catch (Exception $e) {
+            error_log("ERROR en generarEmbeddings: " . $e->getMessage());
+            throw $e;
         }
         
         throw new Exception('Error generando embeddings con OpenAI');
     }
-    
     /**
      * Analizar actividades y asociar con obligaciones
      */

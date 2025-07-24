@@ -7,6 +7,10 @@ class EmbeddingsService
     public static function generar($texto, $modeloId = null)
     {
         try {
+            error_log("EmbeddingsService::generar() - INICIO");
+            error_log("- Texto longitud: " . strlen($texto));
+            error_log("- Modelo ID solicitado: " . ($modeloId ?? 'DEFAULT'));
+            
             $tiempoInicio = microtime(true); // Para medir tiempo de respuesta
             
             if (empty($texto)) {
@@ -17,6 +21,7 @@ class EmbeddingsService
 
             // Obtener modelo de embeddings
             if (!$modeloId) {
+                error_log("Buscando modelo predeterminado...");
                 // Usar modelo predeterminado
                 $stmt = $db->prepare("
                     SELECT im.* 
@@ -30,6 +35,7 @@ class EmbeddingsService
                 $stmt->execute();
                 $modelo = $stmt->fetch();
             } else {
+                error_log("Buscando modelo específico ID: " . $modeloId);
                 // Usar modelo específico
                 $stmt = $db->prepare("
                     SELECT im.* 
@@ -45,28 +51,40 @@ class EmbeddingsService
             }
 
             if (!$modelo) {
+                error_log("ERROR: No se encontró modelo de embeddings");
                 throw new Exception('No hay modelo de embeddings disponible');
             }
+
+            error_log("Modelo encontrado: " . $modelo['proveedor'] . " - " . $modelo['modelo']);
 
             // Truncar texto si excede límite del modelo
             $limiteTokens = $modelo['limite_tokens'] ?? 8191;
             $texto = self::truncarTexto($texto, $limiteTokens);
+            error_log("Texto truncado a tokens: " . self::estimarTokens($texto));
 
             // Generar embedding usando ProviderManager
+            error_log("Cargando ProviderManager...");
             require_once __DIR__ . '/../providers/ai/provider-manager.php';
             $providerManager = ProviderManager::getInstance();
 
             if (!$providerManager->hasProvider($modelo['proveedor'])) {
+                error_log("ERROR: Provider no disponible: " . $modelo['proveedor']);
                 throw new Exception("Provider {$modelo['proveedor']} no configurado");
             }
 
+            error_log("Obteniendo provider: " . $modelo['proveedor']);
             $provider = $providerManager->getProvider($modelo['proveedor']);
+            
+            error_log("Llamando a generarEmbeddings()...");
             $embedding = $provider->generarEmbeddings($texto);
+            
+            error_log("Embedding recibido. Dimensiones: " . count($embedding));
+            error_log("Primeros valores: " . implode(', ', array_slice($embedding, 0, 5)) . "...");
 
             // Registrar uso con tiempo de respuesta
             self::registrarUso($modelo['id'], strlen($texto), $tiempoInicio);
 
-            return [
+            $resultado = [
                 'vector' => $embedding,
                 'modelo_id' => $modelo['id'],
                 'modelo' => $modelo['modelo'],
@@ -74,9 +92,13 @@ class EmbeddingsService
                 'dimensiones' => count($embedding),
                 'tokens_estimados' => self::estimarTokens($texto)
             ];
+            
+            error_log("EmbeddingsService::generar() - FIN EXITOSO");
+            return $resultado;
 
         } catch (Exception $e) {
-            error_log("Error generando embedding: " . $e->getMessage());
+            error_log("ERROR en EmbeddingsService::generar(): " . $e->getMessage());
+            error_log("Stack trace: " . $e->getTraceAsString());
             throw $e;
         }
     }
