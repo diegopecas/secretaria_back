@@ -96,7 +96,8 @@ class ActividadesArchivosService
                     almacenar_archivo,
                     extraer_texto,
                     estado_extraccion,
-                    usuario_carga_id
+                    usuario_carga_id,
+                    procesado
                 ) VALUES (
                     :actividad_id,
                     :nombre_archivo,
@@ -108,7 +109,8 @@ class ActividadesArchivosService
                     :almacenar_archivo,
                     :extraer_texto,
                     'pendiente',
-                    :usuario_carga_id
+                    :usuario_carga_id,
+                    0
                 )";
             
             $stmt = $db->prepare($sql);
@@ -127,6 +129,49 @@ class ActividadesArchivosService
             $archivoInfo['id'] = $db->lastInsertId();
             $archivoInfo['tipo_archivo_id'] = $tipo_archivo_id;
             
+            // Intentar extraer texto y generar embeddings inmediatamente
+            try {
+                require_once __DIR__ . '/extractor.service.php';
+                require_once __DIR__ . '/embeddings.service.php';
+                
+                // Obtener path completo del archivo
+                $archivoPath = __DIR__ . '/../' . $archivoInfo['path'];
+                
+                // Verificar si podemos extraer texto de este tipo de archivo
+                if (ExtractorService::puedeExtraerTexto($archivoInfo['extension'])) {
+                    $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivoInfo['extension']);
+                    
+                    if ($textoExtraido) {
+                        // Generar embedding del texto extraído
+                        $embeddingResult = EmbeddingsService::generar($textoExtraido);
+                        
+                        // Actualizar archivo con texto y embedding
+                        $stmtUpdate = $db->prepare("
+                            UPDATE actividades_archivos 
+                            SET texto_extraido = :texto,
+                                embeddings = :embeddings,
+                                modelo_extraccion_id = :modelo_id,
+                                estado_extraccion = 'completado',
+                                procesado = 1,
+                                fecha_procesamiento = NOW()
+                            WHERE id = :id
+                        ");
+                        $stmtUpdate->bindParam(':texto', $textoExtraido);
+                        $stmtUpdate->bindParam(':embeddings', json_encode($embeddingResult['vector']));
+                        $stmtUpdate->bindParam(':modelo_id', $embeddingResult['modelo_id']);
+                        $stmtUpdate->bindParam(':id', $archivoInfo['id']);
+                        $stmtUpdate->execute();
+                        
+                        $archivoInfo['texto_extraido'] = $textoExtraido;
+                        $archivoInfo['procesado'] = true;
+                    }
+                }
+            } catch (Exception $e) {
+                // Si falla la extracción/embedding, no fallar toda la operación
+                error_log("Error procesando archivo {$archivoInfo['id']}: " . $e->getMessage());
+                // El archivo queda marcado como pendiente
+            }
+            
             return $archivoInfo;
             
         } catch (Exception $e) {
@@ -144,10 +189,12 @@ class ActividadesArchivosService
                     aa.*,
                     ta.nombre as tipo_archivo_nombre,
                     ta.codigo as tipo_archivo_codigo,
-                    u.nombre as usuario_carga_nombre
+                    u.nombre as usuario_carga_nombre,
+                    im.modelo as modelo_extraccion_nombre
                 FROM actividades_archivos aa
                 LEFT JOIN tipos_archivo ta ON aa.tipo_archivo_id = ta.id
                 LEFT JOIN usuarios u ON aa.usuario_carga_id = u.id
+                LEFT JOIN ia_modelos im ON aa.modelo_extraccion_id = im.id
                 WHERE aa.actividad_id = :actividad_id
                 ORDER BY aa.fecha_carga DESC";
             
@@ -371,7 +418,7 @@ class ActividadesArchivosService
         }
     }
     
-    // Buscar archivos por contenido
+    // Buscar archivos por contenido con embeddings
     public static function buscarPorContenido()
     {
         try {
@@ -380,6 +427,7 @@ class ActividadesArchivosService
             
             $contrato_id = Flight::request()->data['contrato_id'] ?? null;
             $busqueda = Flight::request()->data['busqueda'] ?? null;
+            $usar_embeddings = Flight::request()->data['usar_embeddings'] ?? true;
             
             if (!$contrato_id || !$busqueda) {
                 responderJSON(['error' => 'Contrato y búsqueda son requeridos'], 400);
@@ -416,37 +464,96 @@ class ActividadesArchivosService
                 }
             }
             
-            // Buscar en archivos procesados
-            $sql = "SELECT 
-                    aa.id,
-                    aa.nombre_archivo,
-                    aa.archivo_url,
-                    aa.fecha_carga,
-                    a.id as actividad_id,
-                    a.fecha_actividad,
-                    a.descripcion_actividad,
-                    MATCH(aa.texto_extraido) AGAINST(:busqueda IN NATURAL LANGUAGE MODE) as relevancia
-                FROM actividades_archivos aa
-                INNER JOIN actividades a ON aa.actividad_id = a.id
-                WHERE a.contrato_id = :contrato_id
-                AND aa.procesado = 1
-                AND aa.texto_extraido IS NOT NULL
-                AND MATCH(aa.texto_extraido) AGAINST(:busqueda2 IN NATURAL LANGUAGE MODE)
-                ORDER BY relevancia DESC
-                LIMIT 20";
+            $resultados = [];
             
-            $stmt = $db->prepare($sql);
-            $stmt->bindParam(':contrato_id', $contrato_id);
-            $stmt->bindParam(':busqueda', $busqueda);
-            $stmt->bindParam(':busqueda2', $busqueda);
-            $stmt->execute();
-            
-            $resultados = $stmt->fetchAll();
+            if ($usar_embeddings) {
+                // Búsqueda con embeddings
+                require_once __DIR__ . '/embeddings.service.php';
+                
+                // Generar embedding de la búsqueda
+                $embeddingBusqueda = EmbeddingsService::generar($busqueda);
+                
+                // Buscar archivos con embeddings
+                $sql = "SELECT 
+                        aa.id,
+                        aa.nombre_archivo,
+                        aa.archivo_url,
+                        aa.fecha_carga,
+                        aa.embeddings,
+                        aa.texto_extraido,
+                        a.id as actividad_id,
+                        a.fecha_actividad,
+                        a.descripcion_actividad
+                    FROM actividades_archivos aa
+                    INNER JOIN actividades a ON aa.actividad_id = a.id
+                    WHERE a.contrato_id = :contrato_id
+                    AND aa.procesado = 1
+                    AND aa.embeddings IS NOT NULL";
+                
+                $stmt = $db->prepare($sql);
+                $stmt->bindParam(':contrato_id', $contrato_id);
+                $stmt->execute();
+                
+                while ($row = $stmt->fetch()) {
+                    $similitud = EmbeddingsService::calcularSimilitud(
+                        $embeddingBusqueda['vector'], 
+                        $row['embeddings']
+                    );
+                    
+                    if ($similitud > 0.7) { // Umbral de similitud
+                        $resultados[] = [
+                            'id' => $row['id'],
+                            'nombre_archivo' => $row['nombre_archivo'],
+                            'archivo_url' => $row['archivo_url'],
+                            'fecha_carga' => $row['fecha_carga'],
+                            'actividad_id' => $row['actividad_id'],
+                            'fecha_actividad' => $row['fecha_actividad'],
+                            'descripcion_actividad' => $row['descripcion_actividad'],
+                            'similitud' => $similitud,
+                            'preview' => substr($row['texto_extraido'], 0, 200) . '...'
+                        ];
+                    }
+                }
+                
+                // Ordenar por similitud
+                usort($resultados, function($a, $b) {
+                    return $b['similitud'] <=> $a['similitud'];
+                });
+                
+            } else {
+                // Búsqueda con FULLTEXT
+                $sql = "SELECT 
+                        aa.id,
+                        aa.nombre_archivo,
+                        aa.archivo_url,
+                        aa.fecha_carga,
+                        a.id as actividad_id,
+                        a.fecha_actividad,
+                        a.descripcion_actividad,
+                        MATCH(aa.texto_extraido) AGAINST(:busqueda IN NATURAL LANGUAGE MODE) as relevancia
+                    FROM actividades_archivos aa
+                    INNER JOIN actividades a ON aa.actividad_id = a.id
+                    WHERE a.contrato_id = :contrato_id
+                    AND aa.procesado = 1
+                    AND aa.texto_extraido IS NOT NULL
+                    AND MATCH(aa.texto_extraido) AGAINST(:busqueda2 IN NATURAL LANGUAGE MODE)
+                    ORDER BY relevancia DESC
+                    LIMIT 20";
+                
+                $stmt = $db->prepare($sql);
+                $stmt->bindParam(':contrato_id', $contrato_id);
+                $stmt->bindParam(':busqueda', $busqueda);
+                $stmt->bindParam(':busqueda2', $busqueda);
+                $stmt->execute();
+                
+                $resultados = $stmt->fetchAll();
+            }
             
             responderJSON([
                 'success' => true,
                 'resultados' => $resultados,
-                'total' => count($resultados)
+                'total' => count($resultados),
+                'metodo' => $usar_embeddings ? 'embeddings' : 'fulltext'
             ]);
             
         } catch (Exception $e) {
@@ -472,6 +579,7 @@ class ActividadesArchivosService
                     COUNT(DISTINCT aa.actividad_id) as actividades_con_archivos,
                     SUM(CASE WHEN aa.procesado = 1 THEN 1 ELSE 0 END) as archivos_procesados,
                     SUM(CASE WHEN aa.estado_extraccion = 'completado' THEN 1 ELSE 0 END) as archivos_con_texto,
+                    SUM(CASE WHEN aa.embeddings IS NOT NULL THEN 1 ELSE 0 END) as archivos_con_embeddings,
                     ta.nombre as tipo_archivo,
                     COUNT(*) as cantidad_por_tipo
                 FROM actividades_archivos aa
@@ -534,7 +642,7 @@ class ActividadesArchivosService
         }
     }
     
-    // Procesar archivo para extracción de texto (para IA)
+    // Procesar archivo para extracción de texto y embeddings
     public static function procesarParaIA($archivoId)
     {
         try {
@@ -579,37 +687,200 @@ class ActividadesArchivosService
             $stmt->bindParam(':archivo_id', $archivoId);
             $stmt->execute();
             
-            // TODO: Implementar extracción de texto según tipo
-            // Por ahora, simular procesamiento
+            try {
+                require_once __DIR__ . '/extractor.service.php';
+                require_once __DIR__ . '/embeddings.service.php';
+                
+                // Obtener path completo del archivo
+                $archivoPath = __DIR__ . '/../' . $archivo['archivo_url'];
+                
+                // Extraer texto
+                $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivo['tipo_codigo']);
+                
+                if ($textoExtraido) {
+                    // Generar embedding
+                    $embeddingResult = EmbeddingsService::generar($textoExtraido);
+                    
+                    // Actualizar archivo
+                    $stmt = $db->prepare("
+                        UPDATE actividades_archivos 
+                        SET texto_extraido = :texto,
+                            embeddings = :embeddings,
+                            modelo_extraccion_id = :modelo_id,
+                            procesado = 1,
+                            estado_extraccion = 'completado',
+                            fecha_procesamiento = NOW()
+                        WHERE id = :archivo_id
+                    ");
+                    $stmt->bindParam(':texto', $textoExtraido);
+                    $stmt->bindParam(':embeddings', json_encode($embeddingResult['vector']));
+                    $stmt->bindParam(':modelo_id', $embeddingResult['modelo_id']);
+                    $stmt->bindParam(':archivo_id', $archivoId);
+                    $stmt->execute();
+                    
+                    responderJSON([
+                        'success' => true,
+                        'message' => 'Archivo procesado correctamente',
+                        'texto_extraido' => strlen($textoExtraido) > 500 ? 
+                            substr($textoExtraido, 0, 500) . '...' : $textoExtraido
+                    ]);
+                } else {
+                    // No se pudo extraer texto
+                    $stmt = $db->prepare("
+                        UPDATE actividades_archivos 
+                        SET estado_extraccion = 'error',
+                            fecha_procesamiento = NOW()
+                        WHERE id = :archivo_id
+                    ");
+                    $stmt->bindParam(':archivo_id', $archivoId);
+                    $stmt->execute();
+                    
+                    responderJSON([
+                        'success' => false,
+                        'message' => 'No se pudo extraer texto del archivo'
+                    ]);
+                }
+                
+            } catch (Exception $e) {
+                // Marcar como error
+                $stmt = $db->prepare("
+                    UPDATE actividades_archivos 
+                    SET estado_extraccion = 'error',
+                        fecha_procesamiento = NOW()
+                    WHERE id = :archivo_id
+                ");
+                $stmt->bindParam(':archivo_id', $archivoId);
+                $stmt->execute();
+                
+                throw $e;
+            }
             
-            // Marcar como completado
+        } catch (Exception $e) {
+            error_log("Error procesando archivo: " . $e->getMessage());
+            responderJSON(['error' => 'Error al procesar archivo'], 500);
+        }
+    }
+    
+    // Procesar archivos pendientes (batch)
+    public static function procesarPendientes()
+    {
+        try {
+            requireAuth();
+            $currentUser = Flight::get('currentUser');
+            
+            if (!AuthService::checkPermission($currentUser['id'], 'sistema.configurar')) {
+                responderJSON(['error' => 'No tiene permisos para ejecutar este proceso'], 403);
+                return;
+            }
+            
+            $limite = Flight::request()->query['limite'] ?? 10;
+            
+            $db = Flight::db();
+            
+            // Obtener archivos pendientes
             $stmt = $db->prepare("
-                UPDATE actividades_archivos 
-                SET procesado = 1,
-                    estado_extraccion = 'completado',
-                    fecha_procesamiento = NOW()
-                WHERE id = :archivo_id
+                SELECT aa.id
+                FROM actividades_archivos aa
+                WHERE aa.estado_extraccion = 'pendiente'
+                AND aa.extraer_texto = 1
+                ORDER BY aa.fecha_carga ASC
+                LIMIT :limite
             ");
-            $stmt->bindParam(':archivo_id', $archivoId);
+            $stmt->bindParam(':limite', $limite, PDO::PARAM_INT);
             $stmt->execute();
+            
+            $procesados = 0;
+            $errores = 0;
+            
+            require_once __DIR__ . '/extractor.service.php';
+            require_once __DIR__ . '/embeddings.service.php';
+            
+            while ($archivo = $stmt->fetch()) {
+                try {
+                    // Obtener información completa del archivo
+                    $stmtArchivo = $db->prepare("
+                        SELECT aa.*, ta.codigo as tipo_codigo
+                        FROM actividades_archivos aa
+                        LEFT JOIN tipos_archivo ta ON aa.tipo_archivo_id = ta.id
+                        WHERE aa.id = :id
+                    ");
+                    $stmtArchivo->bindParam(':id', $archivo['id']);
+                    $stmtArchivo->execute();
+                    $archivoCompleto = $stmtArchivo->fetch();
+                    
+                    // Marcar como procesando
+                    $db->prepare("
+                        UPDATE actividades_archivos 
+                        SET estado_extraccion = 'procesando'
+                        WHERE id = :id
+                    ")->execute([':id' => $archivo['id']]);
+                    
+                    // Obtener path completo
+                    $archivoPath = __DIR__ . '/../' . $archivoCompleto['archivo_url'];
+                    
+                    // Extraer texto
+                    $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivoCompleto['tipo_codigo']);
+                    
+                    if ($textoExtraido) {
+                        // Generar embedding
+                        $embeddingResult = EmbeddingsService::generar($textoExtraido);
+                        
+                        // Actualizar archivo
+                        $stmtUpdate = $db->prepare("
+                            UPDATE actividades_archivos 
+                            SET texto_extraido = :texto,
+                                embeddings = :embeddings,
+                                modelo_extraccion_id = :modelo_id,
+                                procesado = 1,
+                                estado_extraccion = 'completado',
+                                fecha_procesamiento = NOW()
+                            WHERE id = :id
+                        ");
+                        $stmtUpdate->execute([
+                            ':texto' => $textoExtraido,
+                            ':embeddings' => json_encode($embeddingResult['vector']),
+                            ':modelo_id' => $embeddingResult['modelo_id'],
+                            ':id' => $archivo['id']
+                        ]);
+                        
+                        $procesados++;
+                    } else {
+                        // No se pudo extraer texto
+                        $db->prepare("
+                            UPDATE actividades_archivos 
+                            SET estado_extraccion = 'error',
+                                fecha_procesamiento = NOW()
+                            WHERE id = :id
+                        ")->execute([':id' => $archivo['id']]);
+                        
+                        $errores++;
+                    }
+                    
+                } catch (Exception $e) {
+                    error_log("Error procesando archivo {$archivo['id']}: " . $e->getMessage());
+                    
+                    // Marcar como error
+                    $db->prepare("
+                        UPDATE actividades_archivos 
+                        SET estado_extraccion = 'error',
+                            fecha_procesamiento = NOW()
+                        WHERE id = :id
+                    ")->execute([':id' => $archivo['id']]);
+                    
+                    $errores++;
+                }
+            }
             
             responderJSON([
                 'success' => true,
-                'message' => 'Archivo procesado correctamente'
+                'procesados' => $procesados,
+                'errores' => $errores,
+                'message' => "Se procesaron $procesados archivos con $errores errores"
             ]);
             
         } catch (Exception $e) {
-            // Marcar como error
-            if (isset($archivoId)) {
-                $db->prepare("
-                    UPDATE actividades_archivos 
-                    SET estado_extraccion = 'error'
-                    WHERE id = :archivo_id
-                ")->execute([':archivo_id' => $archivoId]);
-            }
-            
-            error_log("Error procesando archivo: " . $e->getMessage());
-            responderJSON(['error' => 'Error al procesar archivo'], 500);
+            error_log("Error procesando pendientes: " . $e->getMessage());
+            responderJSON(['error' => 'Error al procesar archivos pendientes'], 500);
         }
     }
     

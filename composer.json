@@ -1,5 +1,7 @@
 {
     "require": {
-        "mikecao/flight": "^3.15"
+        "mikecao/flight": "^3.15",
+        "smalot/pdfparser": "^2.12",
+        "phpoffice/phpword": "^1.4"
     }
 }

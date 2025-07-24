@@ -7,7 +7,45 @@ namespace Composer\Autoload;
 class ComposerStaticInit823e92ae3d3deceb390860de731975bf
 {
     public static $files = array (
+        '0e6d7bf4a5811bfa5cf40c5ccd6fae6a' => __DIR__ . '/..' . '/symfony/polyfill-mbstring/bootstrap.php',
         'fc73bab8d04e21bcdda37ca319c63800' => __DIR__ . '/..' . '/mikecao/flight/flight/autoload.php',
+    );
+
+    public static $prefixLengthsPsr4 = array (
+        'S' => 
+        array (
+            'Symfony\\Polyfill\\Mbstring\\' => 26,
+        ),
+        'P' => 
+        array (
+            'PhpOffice\\PhpWord\\' => 18,
+            'PhpOffice\\Math\\' => 15,
+        ),
+    );
+
+    public static $prefixDirsPsr4 = array (
+        'Symfony\\Polyfill\\Mbstring\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/symfony/polyfill-mbstring',
+        ),
+        'PhpOffice\\PhpWord\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/phpoffice/phpword/src/PhpWord',
+        ),
+        'PhpOffice\\Math\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/phpoffice/math/src/Math',
+        ),
+    );
+
+    public static $prefixesPsr0 = array (
+        'S' => 
+        array (
+            'Smalot\\PdfParser\\' => 
+            array (
+                0 => __DIR__ . '/..' . '/smalot/pdfparser/src',
+            ),
+        ),
     );
 
     public static $classMap = array (
@@ -17,6 +55,9 @@ class ComposerStaticInit823e92ae3d3deceb390860de731975bf
     public static function getInitializer(ClassLoader $loader)
     {
         return \Closure::bind(function () use ($loader) {
+            $loader->prefixLengthsPsr4 = ComposerStaticInit823e92ae3d3deceb390860de731975bf::$prefixLengthsPsr4;
+            $loader->prefixDirsPsr4 = ComposerStaticInit823e92ae3d3deceb390860de731975bf::$prefixDirsPsr4;
+            $loader->prefixesPsr0 = ComposerStaticInit823e92ae3d3deceb390860de731975bf::$prefixesPsr0;
             $loader->classMap = ComposerStaticInit823e92ae3d3deceb390860de731975bf::$classMap;
 
         }, null, ClassLoader::class);
