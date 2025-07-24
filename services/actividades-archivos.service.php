@@ -6,17 +6,17 @@ class ActividadesArchivosService
     {
         $transaccionLocal = false;
         $archivosGuardados = [];
-        
+
         try {
             if (!$db) {
                 $db = Flight::db();
                 $db->beginTransaction();
                 $transaccionLocal = true;
             }
-            
+
             require_once __DIR__ . '/../providers/storage/storage.manager.php';
             $storage = StorageManager::getInstance();
-            
+
             foreach ($files as $key => $file) {
                 // Si es un array de archivos múltiples
                 if (is_array($file['error'])) {
@@ -45,18 +45,17 @@ class ActividadesArchivosService
                     }
                 }
             }
-            
+
             if ($transaccionLocal) {
                 $db->commit();
             }
-            
+
             return $archivosGuardados;
-            
         } catch (Exception $e) {
             if ($transaccionLocal && $db) {
                 $db->rollBack();
             }
-            
+
             // Intentar eliminar archivos físicos guardados si hay error
             foreach ($archivosGuardados as $archivo) {
                 try {
@@ -65,25 +64,68 @@ class ActividadesArchivosService
                     error_log("Error eliminando archivo en rollback: " . $ex->getMessage());
                 }
             }
-            
+
             throw new Exception('Error al agregar archivos: ' . $e->getMessage());
         }
     }
-    
+
     // Procesar un archivo individual
     private static function procesarArchivoIndividual($actividadId, $file, $usuarioId, $db, $storage)
     {
         try {
+            // Obtener información del contrato y contratista
+            $stmtInfo = $db->prepare("
+            SELECT 
+                c.id as contrato_id,
+                c.numero_contrato,
+                YEAR(c.fecha_inicio) as anio_contrato,
+                ct.id as contratista_id,
+                ct.nombre_completo,
+                a.fecha_actividad
+            FROM actividades a
+            INNER JOIN contratos c ON a.contrato_id = c.id
+            INNER JOIN contratistas ct ON c.contratista_id = ct.id
+            WHERE a.id = :actividad_id
+        ");
+            $stmtInfo->bindParam(':actividad_id', $actividadId);
+            $stmtInfo->execute();
+            $info = $stmtInfo->fetch();
+
+            if (!$info) {
+                throw new Exception("No se encontró información de la actividad");
+            }
+
+            // Limpiar nombres para la ruta
+            $nombreContratistaLimpio = self::limpiarNombreParaRuta($info['nombre_completo']);
+            $numeroContratoLimpio = self::limpiarNombreParaRuta($info['numero_contrato']);
+
+            // Crear estructura de carpetas
+            $carpetaContratista = $info['contratista_id'] . '_' . $nombreContratistaLimpio;
+            $carpetaContrato = $info['anio_contrato'] . '_' . $numeroContratoLimpio;
+            $anioActividad = date('Y', strtotime($info['fecha_actividad']));
+            $mesActividad = date('m', strtotime($info['fecha_actividad']));
+
+            $rutaCompleta = sprintf(
+                'contratistas/%s/contratos/%s/actividades/%s/%s/act_%s',
+                $carpetaContratista,
+                $carpetaContrato,
+                $anioActividad,
+                $mesActividad,
+                $actividadId
+            );
+
+            error_log("Guardando archivo en: " . $rutaCompleta);
+
             // Guardar archivo usando StorageManager
-            $archivoInfo = $storage->guardarArchivo($file, 'actividades', (string)$actividadId);
-            
+            $archivoInfo = $storage->guardarArchivo($file, $rutaCompleta);
+
             // Determinar tipo_archivo_id basado en la extensión
             $tipo_archivo_id = self::determinarTipoArchivo($archivoInfo['extension']);
-            
+
             // Por defecto, almacenar archivo y extraer texto
             $almacenar_archivo = true;
             $extraer_texto = true;
-            
+
             // Insertar en la BD con los nuevos campos
             $sql = "INSERT INTO actividades_archivos (
                     actividad_id,
@@ -112,7 +154,7 @@ class ActividadesArchivosService
                     :usuario_carga_id,
                     0
                 )";
-            
+
             $stmt = $db->prepare($sql);
             $stmt->bindParam(':actividad_id', $actividadId);
             $stmt->bindParam(':nombre_archivo', $archivoInfo['nombre_original']);
@@ -125,26 +167,26 @@ class ActividadesArchivosService
             $stmt->bindParam(':extraer_texto', $extraer_texto, PDO::PARAM_BOOL);
             $stmt->bindParam(':usuario_carga_id', $usuarioId);
             $stmt->execute();
-            
+
             $archivoInfo['id'] = $db->lastInsertId();
             $archivoInfo['tipo_archivo_id'] = $tipo_archivo_id;
-            
+
             // Intentar extraer texto y generar embeddings inmediatamente
             try {
                 require_once __DIR__ . '/extractor.service.php';
                 require_once __DIR__ . '/embeddings.service.php';
-                
+
                 // Obtener path completo del archivo
                 $archivoPath = __DIR__ . '/../' . $archivoInfo['path'];
-                
+
                 // Verificar si podemos extraer texto de este tipo de archivo
                 if (ExtractorService::puedeExtraerTexto($archivoInfo['extension'])) {
                     $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivoInfo['extension']);
-                    
+
                     if ($textoExtraido) {
                         // Generar embedding del texto extraído
                         $embeddingResult = EmbeddingsService::generar($textoExtraido);
-                        
+
                         // Actualizar archivo con texto y embedding
                         $stmtUpdate = $db->prepare("
                             UPDATE actividades_archivos 
@@ -161,7 +203,7 @@ class ActividadesArchivosService
                         $stmtUpdate->bindParam(':modelo_id', $embeddingResult['modelo_id']);
                         $stmtUpdate->bindParam(':id', $archivoInfo['id']);
                         $stmtUpdate->execute();
-                        
+
                         $archivoInfo['texto_extraido'] = $textoExtraido;
                         $archivoInfo['procesado'] = true;
                     }
@@ -171,20 +213,19 @@ class ActividadesArchivosService
                 error_log("Error procesando archivo {$archivoInfo['id']}: " . $e->getMessage());
                 // El archivo queda marcado como pendiente
             }
-            
+
             return $archivoInfo;
-            
         } catch (Exception $e) {
             throw new Exception("Error procesando archivo {$file['name']}: " . $e->getMessage());
         }
     }
-    
+
     // Obtener archivos de una actividad
     public static function obtenerPorActividad($actividadId)
     {
         try {
             $db = Flight::db();
-            
+
             $sql = "SELECT 
                     aa.*,
                     ta.nombre as tipo_archivo_nombre,
@@ -197,27 +238,26 @@ class ActividadesArchivosService
                 LEFT JOIN ia_modelos im ON aa.modelo_extraccion_id = im.id
                 WHERE aa.actividad_id = :actividad_id
                 ORDER BY aa.fecha_carga DESC";
-            
+
             $stmt = $db->prepare($sql);
             $stmt->bindParam(':actividad_id', $actividadId);
             $stmt->execute();
-            
+
             return $stmt->fetchAll();
-            
         } catch (Exception $e) {
             throw new Exception('Error al obtener archivos: ' . $e->getMessage());
         }
     }
-    
+
     // Obtener un archivo específico
     public static function obtenerPorId($archivoId)
     {
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             $db = Flight::db();
-            
+
             $sql = "SELECT 
                     aa.*,
                     a.contrato_id,
@@ -229,17 +269,17 @@ class ActividadesArchivosService
                 INNER JOIN contratos c ON a.contrato_id = c.id
                 LEFT JOIN tipos_archivo ta ON aa.tipo_archivo_id = ta.id
                 WHERE aa.id = :archivo_id";
-            
+
             $stmt = $db->prepare($sql);
             $stmt->bindParam(':archivo_id', $archivoId);
             $stmt->execute();
             $archivo = $stmt->fetch();
-            
+
             if (!$archivo) {
                 responderJSON(['error' => 'Archivo no encontrado'], 404);
                 return;
             }
-            
+
             // Verificar acceso usando usuarios_contratistas
             $stmtContratista = $db->prepare("
                 SELECT COUNT(*) as es_contratista
@@ -249,7 +289,7 @@ class ActividadesArchivosService
             $stmtContratista->bindParam(':usuario_id', $currentUser['id']);
             $stmtContratista->execute();
             $resultContratista = $stmtContratista->fetch();
-            
+
             // Si es contratista, validar acceso
             if ($resultContratista['es_contratista'] > 0) {
                 $stmtAcceso = $db->prepare("
@@ -262,38 +302,37 @@ class ActividadesArchivosService
                 $stmtAcceso->bindParam(':contratista_id', $archivo['contratista_id']);
                 $stmtAcceso->execute();
                 $resultadoAcceso = $stmtAcceso->fetch();
-                
+
                 if ($resultadoAcceso['tiene_acceso'] == 0) {
                     responderJSON(['error' => 'No tiene acceso a este archivo'], 403);
                     return;
                 }
             }
-            
+
             responderJSON([
                 'success' => true,
                 'archivo' => $archivo
             ]);
-            
         } catch (Exception $e) {
             error_log("Error obteniendo archivo: " . $e->getMessage());
             responderJSON(['error' => 'Error al obtener archivo'], 500);
         }
     }
-    
+
     // Eliminar un archivo
     public static function eliminar($archivoId)
     {
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             if (!AuthService::checkPermission($currentUser['id'], 'actividades.registrar')) {
                 responderJSON(['error' => 'No tiene permisos para eliminar archivos'], 403);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             // Obtener información del archivo con validación de acceso
             $sql = "SELECT 
                     aa.*,
@@ -303,17 +342,17 @@ class ActividadesArchivosService
                 INNER JOIN actividades a ON aa.actividad_id = a.id
                 INNER JOIN contratos c ON a.contrato_id = c.id
                 WHERE aa.id = :archivo_id";
-            
+
             $stmt = $db->prepare($sql);
             $stmt->bindParam(':archivo_id', $archivoId);
             $stmt->execute();
             $archivo = $stmt->fetch();
-            
+
             if (!$archivo) {
                 responderJSON(['error' => 'Archivo no encontrado'], 404);
                 return;
             }
-            
+
             // Verificar acceso usando usuarios_contratistas
             $stmtContratista = $db->prepare("
                 SELECT COUNT(*) as es_contratista
@@ -323,7 +362,7 @@ class ActividadesArchivosService
             $stmtContratista->bindParam(':usuario_id', $currentUser['id']);
             $stmtContratista->execute();
             $resultContratista = $stmtContratista->fetch();
-            
+
             // Si es contratista, validar acceso
             if ($resultContratista['es_contratista'] > 0) {
                 $stmtAcceso = $db->prepare("
@@ -336,18 +375,18 @@ class ActividadesArchivosService
                 $stmtAcceso->bindParam(':contratista_id', $archivo['contratista_id']);
                 $stmtAcceso->execute();
                 $resultadoAcceso = $stmtAcceso->fetch();
-                
+
                 if ($resultadoAcceso['tiene_acceso'] == 0) {
                     responderJSON(['error' => 'No tiene acceso a este archivo'], 403);
                     return;
                 }
             }
-            
+
             // Eliminar archivo físico si está marcado para almacenar
             if ($archivo['almacenar_archivo']) {
                 require_once __DIR__ . '/../providers/storage/storage.manager.php';
                 $storage = StorageManager::getInstance();
-                
+
                 try {
                     $storage->eliminarArchivo($archivo['archivo_url']);
                 } catch (Exception $e) {
@@ -355,23 +394,22 @@ class ActividadesArchivosService
                     // Continuar con la eliminación del registro
                 }
             }
-            
+
             // Eliminar registro de la BD
             $stmt = $db->prepare("DELETE FROM actividades_archivos WHERE id = :archivo_id");
             $stmt->bindParam(':archivo_id', $archivoId);
             $stmt->execute();
-            
+
             responderJSON([
                 'success' => true,
                 'message' => 'Archivo eliminado correctamente'
             ]);
-            
         } catch (Exception $e) {
             error_log("Error eliminando archivo: " . $e->getMessage());
             responderJSON(['error' => 'Error al eliminar archivo'], 500);
         }
     }
-    
+
     // Eliminar todos los archivos de una actividad (usado internamente)
     public static function eliminarPorActividad($actividadId, $db = null)
     {
@@ -379,7 +417,7 @@ class ActividadesArchivosService
             if (!$db) {
                 $db = Flight::db();
             }
-            
+
             // Obtener archivos antes de eliminar
             $stmt = $db->prepare("
                 SELECT id, archivo_url, almacenar_archivo 
@@ -389,12 +427,12 @@ class ActividadesArchivosService
             $stmt->bindParam(':actividad_id', $actividadId);
             $stmt->execute();
             $archivos = $stmt->fetchAll();
-            
+
             // Eliminar archivos físicos si están marcados para almacenar
             if (count($archivos) > 0) {
                 require_once __DIR__ . '/../providers/storage/storage.manager.php';
                 $storage = StorageManager::getInstance();
-                
+
                 foreach ($archivos as $archivo) {
                     if ($archivo['almacenar_archivo']) {
                         try {
@@ -405,37 +443,36 @@ class ActividadesArchivosService
                     }
                 }
             }
-            
+
             // Eliminar registros de la BD (se eliminan por CASCADE pero por consistencia)
             $stmt = $db->prepare("DELETE FROM actividades_archivos WHERE actividad_id = :actividad_id");
             $stmt->bindParam(':actividad_id', $actividadId);
             $stmt->execute();
-            
+
             return true;
-            
         } catch (Exception $e) {
             throw new Exception('Error al eliminar archivos: ' . $e->getMessage());
         }
     }
-    
+
     // Buscar archivos por contenido con embeddings
     public static function buscarPorContenido()
     {
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             $contrato_id = Flight::request()->data['contrato_id'] ?? null;
             $busqueda = Flight::request()->data['busqueda'] ?? null;
             $usar_embeddings = Flight::request()->data['usar_embeddings'] ?? true;
-            
+
             if (!$contrato_id || !$busqueda) {
                 responderJSON(['error' => 'Contrato y búsqueda son requeridos'], 400);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             // Verificar acceso al contrato usando usuarios_contratistas
             $stmtContratista = $db->prepare("
                 SELECT COUNT(*) as es_contratista
@@ -445,7 +482,7 @@ class ActividadesArchivosService
             $stmtContratista->bindParam(':usuario_id', $currentUser['id']);
             $stmtContratista->execute();
             $resultContratista = $stmtContratista->fetch();
-            
+
             if ($resultContratista['es_contratista'] > 0) {
                 $stmtAcceso = $db->prepare("
                     SELECT COUNT(*) as tiene_acceso
@@ -457,22 +494,22 @@ class ActividadesArchivosService
                 $stmtAcceso->bindParam(':usuario_id', $currentUser['id']);
                 $stmtAcceso->execute();
                 $resultadoAcceso = $stmtAcceso->fetch();
-                
+
                 if ($resultadoAcceso['tiene_acceso'] == 0) {
                     responderJSON(['error' => 'No tiene acceso a este contrato'], 403);
                     return;
                 }
             }
-            
+
             $resultados = [];
-            
+
             if ($usar_embeddings) {
                 // Búsqueda con embeddings
                 require_once __DIR__ . '/embeddings.service.php';
-                
+
                 // Generar embedding de la búsqueda
                 $embeddingBusqueda = EmbeddingsService::generar($busqueda);
-                
+
                 // Buscar archivos con embeddings
                 $sql = "SELECT 
                         aa.id,
@@ -489,17 +526,17 @@ class ActividadesArchivosService
                     WHERE a.contrato_id = :contrato_id
                     AND aa.procesado = 1
                     AND aa.embeddings IS NOT NULL";
-                
+
                 $stmt = $db->prepare($sql);
                 $stmt->bindParam(':contrato_id', $contrato_id);
                 $stmt->execute();
-                
+
                 while ($row = $stmt->fetch()) {
                     $similitud = EmbeddingsService::calcularSimilitud(
-                        $embeddingBusqueda['vector'], 
+                        $embeddingBusqueda['vector'],
                         $row['embeddings']
                     );
-                    
+
                     if ($similitud > 0.7) { // Umbral de similitud
                         $resultados[] = [
                             'id' => $row['id'],
@@ -514,12 +551,11 @@ class ActividadesArchivosService
                         ];
                     }
                 }
-                
+
                 // Ordenar por similitud
-                usort($resultados, function($a, $b) {
+                usort($resultados, function ($a, $b) {
                     return $b['similitud'] <=> $a['similitud'];
                 });
-                
             } else {
                 // Búsqueda con FULLTEXT
                 $sql = "SELECT 
@@ -539,40 +575,39 @@ class ActividadesArchivosService
                     AND MATCH(aa.texto_extraido) AGAINST(:busqueda2 IN NATURAL LANGUAGE MODE)
                     ORDER BY relevancia DESC
                     LIMIT 20";
-                
+
                 $stmt = $db->prepare($sql);
                 $stmt->bindParam(':contrato_id', $contrato_id);
                 $stmt->bindParam(':busqueda', $busqueda);
                 $stmt->bindParam(':busqueda2', $busqueda);
                 $stmt->execute();
-                
+
                 $resultados = $stmt->fetchAll();
             }
-            
+
             responderJSON([
                 'success' => true,
                 'resultados' => $resultados,
                 'total' => count($resultados),
                 'metodo' => $usar_embeddings ? 'embeddings' : 'fulltext'
             ]);
-            
         } catch (Exception $e) {
             error_log("Error buscando archivos: " . $e->getMessage());
             responderJSON(['error' => 'Error al buscar archivos'], 500);
         }
     }
-    
+
     // Obtener estadísticas de archivos
     public static function obtenerEstadisticas()
     {
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             $contrato_id = Flight::request()->query['contrato_id'] ?? null;
-            
+
             $db = Flight::db();
-            
+
             $sql = "SELECT 
                     COUNT(*) as total_archivos,
                     SUM(aa.tamanio_bytes) as espacio_total,
@@ -585,9 +620,9 @@ class ActividadesArchivosService
                 FROM actividades_archivos aa
                 INNER JOIN actividades a ON aa.actividad_id = a.id
                 LEFT JOIN tipos_archivo ta ON aa.tipo_archivo_id = ta.id";
-            
+
             $params = [];
-            
+
             if ($contrato_id) {
                 // Verificar acceso al contrato si es contratista
                 $stmtContratista = $db->prepare("
@@ -598,7 +633,7 @@ class ActividadesArchivosService
                 $stmtContratista->bindParam(':usuario_id', $currentUser['id']);
                 $stmtContratista->execute();
                 $resultContratista = $stmtContratista->fetch();
-                
+
                 if ($resultContratista['es_contratista'] > 0) {
                     $stmtAcceso = $db->prepare("
                         SELECT COUNT(*) as tiene_acceso
@@ -610,52 +645,51 @@ class ActividadesArchivosService
                     $stmtAcceso->bindParam(':usuario_id', $currentUser['id']);
                     $stmtAcceso->execute();
                     $resultadoAcceso = $stmtAcceso->fetch();
-                    
+
                     if ($resultadoAcceso['tiene_acceso'] == 0) {
                         responderJSON(['error' => 'No tiene acceso a este contrato'], 403);
                         return;
                     }
                 }
-                
+
                 $sql .= " WHERE a.contrato_id = :contrato_id";
                 $params[':contrato_id'] = $contrato_id;
             }
-            
+
             $sql .= " GROUP BY ta.id, ta.nombre";
-            
+
             $stmt = $db->prepare($sql);
             foreach ($params as $key => $value) {
                 $stmt->bindValue($key, $value);
             }
             $stmt->execute();
-            
+
             $estadisticas = $stmt->fetchAll();
-            
+
             responderJSON([
                 'success' => true,
                 'estadisticas' => $estadisticas
             ]);
-            
         } catch (Exception $e) {
             error_log("Error obteniendo estadísticas: " . $e->getMessage());
             responderJSON(['error' => 'Error al obtener estadísticas'], 500);
         }
     }
-    
+
     // Procesar archivo para extracción de texto y embeddings
     public static function procesarParaIA($archivoId)
     {
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             if (!AuthService::checkPermission($currentUser['id'], 'actividades.registrar')) {
                 responderJSON(['error' => 'No tiene permisos para procesar archivos'], 403);
                 return;
             }
-            
+
             $db = Flight::db();
-            
+
             // Obtener información del archivo
             $stmt = $db->prepare("
                 SELECT aa.*, ta.codigo as tipo_codigo
@@ -666,18 +700,18 @@ class ActividadesArchivosService
             $stmt->bindParam(':archivo_id', $archivoId);
             $stmt->execute();
             $archivo = $stmt->fetch();
-            
+
             if (!$archivo) {
                 responderJSON(['error' => 'Archivo no encontrado'], 404);
                 return;
             }
-            
+
             // Verificar que esté marcado para extraer texto
             if (!$archivo['extraer_texto']) {
                 responderJSON(['error' => 'Este archivo no está marcado para extracción de texto'], 400);
                 return;
             }
-            
+
             // Actualizar estado a procesando
             $stmt = $db->prepare("
                 UPDATE actividades_archivos 
@@ -686,21 +720,21 @@ class ActividadesArchivosService
             ");
             $stmt->bindParam(':archivo_id', $archivoId);
             $stmt->execute();
-            
+
             try {
                 require_once __DIR__ . '/extractor.service.php';
                 require_once __DIR__ . '/embeddings.service.php';
-                
+
                 // Obtener path completo del archivo
                 $archivoPath = __DIR__ . '/../' . $archivo['archivo_url'];
-                
+
                 // Extraer texto
                 $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivo['tipo_codigo']);
-                
+
                 if ($textoExtraido) {
                     // Generar embedding
                     $embeddingResult = EmbeddingsService::generar($textoExtraido);
-                    
+
                     // Actualizar archivo
                     $stmt = $db->prepare("
                         UPDATE actividades_archivos 
@@ -717,11 +751,11 @@ class ActividadesArchivosService
                     $stmt->bindParam(':modelo_id', $embeddingResult['modelo_id']);
                     $stmt->bindParam(':archivo_id', $archivoId);
                     $stmt->execute();
-                    
+
                     responderJSON([
                         'success' => true,
                         'message' => 'Archivo procesado correctamente',
-                        'texto_extraido' => strlen($textoExtraido) > 500 ? 
+                        'texto_extraido' => strlen($textoExtraido) > 500 ?
                             substr($textoExtraido, 0, 500) . '...' : $textoExtraido
                     ]);
                 } else {
@@ -734,13 +768,12 @@ class ActividadesArchivosService
                     ");
                     $stmt->bindParam(':archivo_id', $archivoId);
                     $stmt->execute();
-                    
+
                     responderJSON([
                         'success' => false,
                         'message' => 'No se pudo extraer texto del archivo'
                     ]);
                 }
-                
             } catch (Exception $e) {
                 // Marcar como error
                 $stmt = $db->prepare("
@@ -751,32 +784,31 @@ class ActividadesArchivosService
                 ");
                 $stmt->bindParam(':archivo_id', $archivoId);
                 $stmt->execute();
-                
+
                 throw $e;
             }
-            
         } catch (Exception $e) {
             error_log("Error procesando archivo: " . $e->getMessage());
             responderJSON(['error' => 'Error al procesar archivo'], 500);
         }
     }
-    
+
     // Procesar archivos pendientes (batch)
     public static function procesarPendientes()
     {
         try {
             requireAuth();
             $currentUser = Flight::get('currentUser');
-            
+
             if (!AuthService::checkPermission($currentUser['id'], 'sistema.configurar')) {
                 responderJSON(['error' => 'No tiene permisos para ejecutar este proceso'], 403);
                 return;
             }
-            
+
             $limite = Flight::request()->query['limite'] ?? 10;
-            
+
             $db = Flight::db();
-            
+
             // Obtener archivos pendientes
             $stmt = $db->prepare("
                 SELECT aa.id
@@ -788,13 +820,13 @@ class ActividadesArchivosService
             ");
             $stmt->bindParam(':limite', $limite, PDO::PARAM_INT);
             $stmt->execute();
-            
+
             $procesados = 0;
             $errores = 0;
-            
+
             require_once __DIR__ . '/extractor.service.php';
             require_once __DIR__ . '/embeddings.service.php';
-            
+
             while ($archivo = $stmt->fetch()) {
                 try {
                     // Obtener información completa del archivo
@@ -807,24 +839,24 @@ class ActividadesArchivosService
                     $stmtArchivo->bindParam(':id', $archivo['id']);
                     $stmtArchivo->execute();
                     $archivoCompleto = $stmtArchivo->fetch();
-                    
+
                     // Marcar como procesando
                     $db->prepare("
                         UPDATE actividades_archivos 
                         SET estado_extraccion = 'procesando'
                         WHERE id = :id
                     ")->execute([':id' => $archivo['id']]);
-                    
+
                     // Obtener path completo
                     $archivoPath = __DIR__ . '/../' . $archivoCompleto['archivo_url'];
-                    
+
                     // Extraer texto
                     $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivoCompleto['tipo_codigo']);
-                    
+
                     if ($textoExtraido) {
                         // Generar embedding
                         $embeddingResult = EmbeddingsService::generar($textoExtraido);
-                        
+
                         // Actualizar archivo
                         $stmtUpdate = $db->prepare("
                             UPDATE actividades_archivos 
@@ -842,7 +874,7 @@ class ActividadesArchivosService
                             ':modelo_id' => $embeddingResult['modelo_id'],
                             ':id' => $archivo['id']
                         ]);
-                        
+
                         $procesados++;
                     } else {
                         // No se pudo extraer texto
@@ -852,13 +884,12 @@ class ActividadesArchivosService
                                 fecha_procesamiento = NOW()
                             WHERE id = :id
                         ")->execute([':id' => $archivo['id']]);
-                        
+
                         $errores++;
                     }
-                    
                 } catch (Exception $e) {
                     error_log("Error procesando archivo {$archivo['id']}: " . $e->getMessage());
-                    
+
                     // Marcar como error
                     $db->prepare("
                         UPDATE actividades_archivos 
@@ -866,38 +897,37 @@ class ActividadesArchivosService
                             fecha_procesamiento = NOW()
                         WHERE id = :id
                     ")->execute([':id' => $archivo['id']]);
-                    
+
                     $errores++;
                 }
             }
-            
+
             responderJSON([
                 'success' => true,
                 'procesados' => $procesados,
                 'errores' => $errores,
                 'message' => "Se procesaron $procesados archivos con $errores errores"
             ]);
-            
         } catch (Exception $e) {
             error_log("Error procesando pendientes: " . $e->getMessage());
             responderJSON(['error' => 'Error al procesar archivos pendientes'], 500);
         }
     }
-    
+
     // Determinar tipo de archivo basado en extensión
     private static function determinarTipoArchivo($extension)
     {
         $db = Flight::db();
-        
+
         // Obtener tipos de archivo de la BD
         $stmt = $db->prepare("SELECT id, codigo FROM tipos_archivo WHERE activo = 1");
         $stmt->execute();
         $tipos = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-        
+
         // Mapeo de extensiones a códigos de tipo
         $mapeo = [
             'pdf' => 'documento',
-            'doc' => 'documento', 
+            'doc' => 'documento',
             'docx' => 'documento',
             'txt' => 'documento',
             'odt' => 'documento',
@@ -923,23 +953,106 @@ class ActividadesArchivosService
             'pptx' => 'presentacion',
             'odp' => 'presentacion',
         ];
-        
+
         $codigo = $mapeo[strtolower($extension)] ?? 'otro';
-        
+
         // Buscar ID del tipo
         foreach ($tipos as $id => $codigoTipo) {
             if ($codigoTipo === $codigo) {
                 return $id;
             }
         }
-        
+
         // Si no se encuentra, retornar el ID de 'otro'
         foreach ($tipos as $id => $codigoTipo) {
             if ($codigoTipo === 'otro') {
                 return $id;
             }
         }
-        
+
         return null;
+    }
+    /**
+     * Limpiar nombre para uso en rutas de archivos
+     * Maneja correctamente caracteres especiales del español
+     */
+    private static function limpiarNombreParaRuta($nombre)
+    {
+        // Tabla de conversión de caracteres especiales
+        $conversiones = [
+            // Vocales con tilde
+            'á' => 'a',
+            'Á' => 'A',
+            'é' => 'e',
+            'É' => 'E',
+            'í' => 'i',
+            'Í' => 'I',
+            'ó' => 'o',
+            'Ó' => 'O',
+            'ú' => 'u',
+            'Ú' => 'U',
+            'ü' => 'u',
+            'Ü' => 'U',
+
+            // Eñes
+            'ñ' => 'n',
+            'Ñ' => 'N',
+
+            // Otros caracteres comunes
+            'ç' => 'c',
+            'Ç' => 'C',
+            ' ' => '_',  // Espacios a guiones bajos
+            '-' => '_',  // Guiones a guiones bajos para consistencia
+            '.' => '',   // Eliminar puntos
+            ',' => '',   // Eliminar comas
+            ';' => '',   // Eliminar punto y coma
+            ':' => '',   // Eliminar dos puntos
+            '(' => '',   // Eliminar paréntesis
+            ')' => '',
+            '[' => '',   // Eliminar corchetes
+            ']' => '',
+            '{' => '',   // Eliminar llaves
+            '}' => '',
+            '/' => '_',  // Barras a guiones bajos
+            '\\' => '_', // Backslash a guiones bajos
+            '"' => '',   // Eliminar comillas
+            "'" => '',   // Eliminar apóstrofes
+            '&' => 'y',  // Ampersand a 'y'
+            '@' => 'a',  // Arroba a 'a'
+            '#' => '',   // Eliminar numeral
+            '$' => '',   // Eliminar signo de dólar
+            '%' => '',   // Eliminar porcentaje
+            '^' => '',   // Eliminar circunflejo
+            '*' => '',   // Eliminar asterisco
+            '!' => '',   // Eliminar exclamación
+            '¡' => '',   // Eliminar exclamación invertida
+            '?' => '',   // Eliminar interrogación
+            '¿' => '',   // Eliminar interrogación invertida
+        ];
+
+        // Aplicar conversiones
+        $nombreLimpio = strtr($nombre, $conversiones);
+
+        // Convertir a minúsculas
+        $nombreLimpio = strtolower($nombreLimpio);
+
+        // Eliminar cualquier caracter no alfanumérico que haya quedado
+        $nombreLimpio = preg_replace('/[^a-z0-9_-]/', '', $nombreLimpio);
+
+        // Eliminar guiones bajos múltiples
+        $nombreLimpio = preg_replace('/_+/', '_', $nombreLimpio);
+
+        // Eliminar guiones bajos al inicio y final
+        $nombreLimpio = trim($nombreLimpio, '_');
+
+        // Si queda vacío, usar un nombre genérico
+        if (empty($nombreLimpio)) {
+            $nombreLimpio = 'sin_nombre';
+        }
+
+        // Limitar longitud (sistemas de archivos tienen límites)
+        $nombreLimpio = substr($nombreLimpio, 0, 50);
+
+        return $nombreLimpio;
     }
 }

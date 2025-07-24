@@ -88,29 +88,34 @@ class StorageManager
      * @param string|null $subfolder Subcarpeta adicional opcional
      * @return array Información del archivo guardado
      */
-    public function guardarArchivo(array $file, string $categoria = 'actividades', ?string $subfolder = null): array
+    public function guardarArchivo(array $file, string $rutaBase = 'actividades', ?string $subfolder = null): array
     {
-        // 1. Validar el archivo
+        // Validar el archivo
         $this->validarArchivo($file);
 
-        // 2. Generar nombre único y path
+        // Generar nombre único
         $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
         $nombreUnico = $this->generarNombreUnico($extension);
 
-        // Construir path: categoria/año/mes/[subfolder]/archivo
-        $pathParts = [$categoria, date('Y'), date('m')];
-        if ($subfolder) {
-            $pathParts[] = $subfolder;
+        // Si se proporciona una ruta base completa, usarla tal cual
+        if (strpos($rutaBase, '/') !== false) {
+            // Es una ruta completa, usarla directamente
+            $path = $rutaBase . '/' . $nombreUnico;
+        } else {
+            // Es el comportamiento anterior (retrocompatibilidad)
+            $pathParts = [$rutaBase, date('Y'), date('m')];
+            if ($subfolder) {
+                $pathParts[] = $subfolder;
+            }
+            $pathParts[] = $nombreUnico;
+            $path = implode('/', $pathParts);
         }
-        $pathParts[] = $nombreUnico;
 
-        $path = implode('/', $pathParts);
-
-        // 3. Guardar usando el driver
+        // Guardar usando el driver
         try {
             $resultado = $this->driver->guardar($file, $path);
 
-            // 4. Agregar información adicional
+            // Agregar información adicional
             $resultado['nombre_original'] = $file['name'];
             $resultado['tipo_archivo'] = $this->detectarTipoArchivo($extension);
             $resultado['mime_type'] = $file['type'];
