@@ -69,24 +69,26 @@ class ActividadesArchivosService
         }
     }
 
+
     // Procesar un archivo individual
     private static function procesarArchivoIndividual($actividadId, $file, $usuarioId, $db, $storage)
     {
         try {
             // Obtener información del contrato y contratista
             $stmtInfo = $db->prepare("
-            SELECT 
-                c.id as contrato_id,
-                c.numero_contrato,
-                YEAR(c.fecha_inicio) as anio_contrato,
-                ct.id as contratista_id,
-                ct.nombre_completo,
-                a.fecha_actividad
-            FROM actividades a
-            INNER JOIN contratos c ON a.contrato_id = c.id
-            INNER JOIN contratistas ct ON c.contratista_id = ct.id
-            WHERE a.id = :actividad_id
-        ");
+                SELECT 
+                    c.id as contrato_id,
+                    c.numero_contrato,
+                    YEAR(c.fecha_inicio) as anio_contrato,
+                    ct.id as contratista_id,
+                    ct.nombre_completo,
+                    a.fecha_actividad,
+                    a.embeddings_modelo_id
+                FROM actividades a
+                INNER JOIN contratos c ON a.contrato_id = c.id
+                INNER JOIN contratistas ct ON c.contratista_id = ct.id
+                WHERE a.id = :actividad_id
+            ");
             $stmtInfo->bindParam(':actividad_id', $actividadId);
             $stmtInfo->execute();
             $info = $stmtInfo->fetch();
@@ -128,32 +130,48 @@ class ActividadesArchivosService
 
             // Insertar en la BD con los nuevos campos
             $sql = "INSERT INTO actividades_archivos (
-                    actividad_id,
-                    nombre_archivo,
-                    archivo_url,
-                    tipo_archivo_id,
-                    mime_type,
-                    tamanio_bytes,
-                    hash_archivo,
-                    almacenar_archivo,
-                    extraer_texto,
-                    estado_extraccion,
-                    usuario_carga_id,
-                    procesado
-                ) VALUES (
-                    :actividad_id,
-                    :nombre_archivo,
-                    :archivo_url,
-                    :tipo_archivo_id,
-                    :mime_type,
-                    :tamanio_bytes,
-                    :hash_archivo,
-                    :almacenar_archivo,
-                    :extraer_texto,
-                    'pendiente',
-                    :usuario_carga_id,
-                    0
-                )";
+                actividad_id,
+                nombre_archivo,
+                archivo_url,
+                tipo_archivo_id,
+                mime_type,
+                tamanio_bytes,
+                hash_archivo,
+                almacenar_archivo,
+                extraer_texto,
+                estado_extraccion,
+                usuario_carga_id,
+                procesado,
+                texto_extraido
+            ) VALUES (
+                :actividad_id,
+                :nombre_archivo,
+                :archivo_url,
+                :tipo_archivo_id,
+                :mime_type,
+                :tamanio_bytes,
+                :hash_archivo,
+                :almacenar_archivo,
+                :extraer_texto,
+                'pendiente',
+                :usuario_carga_id,
+                0,
+                :texto_extraido
+            )";
+
+            // Extraer texto inmediatamente si es posible
+            $textoExtraido = null;
+            if (ExtractorService::puedeExtraerTexto($archivoInfo['extension'])) {
+                try {
+                    require_once __DIR__ . '/extractor.service.php';
+                    $archivoPath = __DIR__ . '/../uploads/' . $archivoInfo['path'];
+                    $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivoInfo['extension']);
+                    error_log("Texto extraído exitosamente, longitud: " . ($textoExtraido ? strlen($textoExtraido) : 0));
+                } catch (Exception $e) {
+                    error_log("Error extrayendo texto: " . $e->getMessage());
+                    $textoExtraido = null;
+                }
+            }
 
             $stmt = $db->prepare($sql);
             $stmt->bindParam(':actividad_id', $actividadId);
@@ -166,52 +184,60 @@ class ActividadesArchivosService
             $stmt->bindParam(':almacenar_archivo', $almacenar_archivo, PDO::PARAM_BOOL);
             $stmt->bindParam(':extraer_texto', $extraer_texto, PDO::PARAM_BOOL);
             $stmt->bindParam(':usuario_carga_id', $usuarioId);
+            $stmt->bindParam(':texto_extraido', $textoExtraido);
             $stmt->execute();
 
             $archivoInfo['id'] = $db->lastInsertId();
             $archivoInfo['tipo_archivo_id'] = $tipo_archivo_id;
+            $archivoInfo['texto_extraido'] = $textoExtraido;
 
-            // Intentar extraer texto y generar embeddings inmediatamente
-            try {
-                require_once __DIR__ . '/extractor.service.php';
-                require_once __DIR__ . '/embeddings.service.php';
+            // Intentar generar embeddings si hay texto extraído
+            if (!empty($textoExtraido)) {
+                try {
+                    error_log("=== INICIO GENERACIÓN EMBEDDINGS ARCHIVO {$archivoInfo['id']} ===");
+                    error_log("Texto ya extraído, longitud: " . strlen($textoExtraido));
+                    
+                    require_once __DIR__ . '/embeddings.service.php';
+                    
+                    // Usar el modelo de la actividad
+                    $embedding_modelo_id = $info['embeddings_modelo_id'] ?? null;
+                    error_log("Modelo ID de la actividad: " . ($embedding_modelo_id ?? 'DEFAULT'));
+                    
+                    // Generar embedding del texto ya extraído
+                    $embeddingResult = EmbeddingsService::generar($textoExtraido, $embedding_modelo_id);
+                    
+                    error_log("Embedding generado exitosamente:");
+                    error_log("- Modelo: " . $embeddingResult['modelo']);
+                    error_log("- Dimensiones: " . $embeddingResult['dimensiones']);
 
-                // Obtener path completo del archivo
-                $archivoPath = __DIR__ . '/../' . $archivoInfo['path'];
+                    // Actualizar archivo con embedding
+                    $stmtUpdate = $db->prepare("
+                    UPDATE actividades_archivos 
+                    SET embeddings = :embeddings,
+                        modelo_extraccion_id = :modelo_id,
+                        estado_extraccion = 'completado',
+                        procesado = 1,
+                        fecha_procesamiento = NOW()
+                    WHERE id = :id
+                ");
 
-                // Verificar si podemos extraer texto de este tipo de archivo
-                if (ExtractorService::puedeExtraerTexto($archivoInfo['extension'])) {
-                    $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivoInfo['extension']);
+                    $embeddingJson = json_encode($embeddingResult['vector']);
+                    $stmtUpdate->bindParam(':embeddings', $embeddingJson);
+                    $stmtUpdate->bindParam(':modelo_id', $embeddingResult['modelo_id']);
+                    $stmtUpdate->bindParam(':id', $archivoInfo['id']);
+                    $stmtUpdate->execute();
 
-                    if ($textoExtraido) {
-                        // Generar embedding del texto extraído
-                        $embeddingResult = EmbeddingsService::generar($textoExtraido);
-
-                        // Actualizar archivo con texto y embedding
-                        $stmtUpdate = $db->prepare("
-                            UPDATE actividades_archivos 
-                            SET texto_extraido = :texto,
-                                embeddings = :embeddings,
-                                modelo_extraccion_id = :modelo_id,
-                                estado_extraccion = 'completado',
-                                procesado = 1,
-                                fecha_procesamiento = NOW()
-                            WHERE id = :id
-                        ");
-                        $stmtUpdate->bindParam(':texto', $textoExtraido);
-                        $stmtUpdate->bindParam(':embeddings', json_encode($embeddingResult['vector']));
-                        $stmtUpdate->bindParam(':modelo_id', $embeddingResult['modelo_id']);
-                        $stmtUpdate->bindParam(':id', $archivoInfo['id']);
-                        $stmtUpdate->execute();
-
-                        $archivoInfo['texto_extraido'] = $textoExtraido;
-                        $archivoInfo['procesado'] = true;
-                    }
+                    $archivoInfo['procesado'] = true;
+                    error_log("=== FIN GENERACIÓN EMBEDDINGS ARCHIVO ===");
+                } catch (Exception $e) {
+                    error_log("ERROR generando embedding archivo {$archivoInfo['id']}:");
+                    error_log("- Mensaje: " . $e->getMessage());
+                    error_log("- Stack: " . $e->getTraceAsString());
+                    // No lanzar el error para no interrumpir el proceso
+                    // El archivo queda pendiente para procesar después
                 }
-            } catch (Exception $e) {
-                // Si falla la extracción/embedding, no fallar toda la operación
-                error_log("Error procesando archivo {$archivoInfo['id']}: " . $e->getMessage());
-                // El archivo queda marcado como pendiente
+            } else {
+                error_log("Archivo {$archivoInfo['id']} sin texto extraído, queda pendiente");
             }
 
             return $archivoInfo;
@@ -733,7 +759,35 @@ class ActividadesArchivosService
 
                 if ($textoExtraido) {
                     // Generar embedding
-                    $embeddingResult = EmbeddingsService::generar($textoExtraido);
+                    // Obtener el modelo de la actividad o usar el predeterminado
+                    $stmtModelo = $db->prepare("
+                        SELECT embeddings_modelo_id 
+                        FROM actividades 
+                        WHERE id = :actividad_id
+                    ");
+                    $stmtModelo->bindParam(':actividad_id', $actividadId);
+                    $stmtModelo->execute();
+                    $actividadModelo = $stmtModelo->fetch();
+
+                    $modelo_id = $actividadModelo['embeddings_modelo_id'] ?? null;
+                    try {
+                        error_log("=== INICIO EMBEDDING ARCHIVO ===");
+                        error_log("Texto a procesar (primeros 100 chars): " . substr($textoExtraido, 0, 100));
+
+                        $embeddingResult = EmbeddingsService::generar($textoExtraido, $modelo_id);
+
+                        error_log("Embedding generado exitosamente");
+                        error_log("- Modelo: " . $embeddingResult['modelo']);
+                        error_log("- Proveedor: " . $embeddingResult['proveedor']);
+                        error_log("- Dimensiones: " . $embeddingResult['dimensiones']);
+                    } catch (Exception $e) {
+                        error_log("ERROR CRÍTICO en embedding:");
+                        error_log("- Error: " . $e->getMessage());
+                        error_log("- Trace: " . $e->getTraceAsString());
+
+                        // Re-lanzar para ver el error completo
+                        throw $e;
+                    }
 
                     // Actualizar archivo
                     $stmt = $db->prepare("
