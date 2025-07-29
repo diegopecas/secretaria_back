@@ -107,18 +107,18 @@ class ChatService
         @ob_implicit_flush(true);
         @ini_set('output_buffering', 'off');
         @ini_set('zlib.output_compression', false);
-        
+
         // Flush inicial para establecer la conexión
         echo ":ok\n\n";
         flush();
 
         try {
             error_log("=== INICIO ChatService::iniciarConversacionStream ===");
-            
+
             // Verificar autenticación por token en query
             $token = $_GET['token'] ?? null;
             error_log("Token recibido: " . ($token ? substr($token, 0, 20) . '...' : 'NO TOKEN'));
-            
+
             if (!$token) {
                 error_log("ERROR: No se proporcionó token");
                 self::enviarEventoSSE('error', ['message' => 'Token no proporcionado']);
@@ -127,7 +127,7 @@ class ChatService
 
             // Verificar token manualmente usando la función global validateToken
             $user = validateToken($token);
-            
+
             if (!$user) {
                 error_log("ERROR: Token inválido");
                 self::enviarEventoSSE('error', ['message' => 'Token inválido']);
@@ -215,7 +215,7 @@ class ChatService
             // Consultar a GPT-4 con streaming
             self::enviarEventoSSE('status', ['message' => 'Generando respuesta...']);
             error_log("Iniciando consulta a GPT-4...");
-            
+
             self::consultarIAStreaming($messages, $sesion_id);
 
             // Actualizar estadísticas
@@ -223,9 +223,9 @@ class ChatService
 
             // Enviar evento de finalización
             self::enviarEventoSSE('done', ['success' => true]);
-            
+
             error_log("=== FIN ChatService::iniciarConversacionStream ===");
-            
+
         } catch (Exception $e) {
             error_log("ERROR CRÍTICO en chat streaming: " . $e->getMessage());
             error_log("Stack trace: " . $e->getTraceAsString());
@@ -848,7 +848,8 @@ class ChatService
                 $buffer = substr($buffer, $pos + 1);
 
                 // Ignorar líneas vacías
-                if (trim($line) === '') continue;
+                if (trim($line) === '')
+                    continue;
 
                 // Verificar si es un mensaje de datos
                 if (strpos($line, 'data: ') === 0) {
@@ -884,6 +885,12 @@ class ChatService
         });
 
         curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        // Configuración SSL mejorada - AGREGAR DESPUÉS DE TIMEOUT
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // Para desarrollo
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false); // Para desarrollo
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
+        curl_setopt($ch, CURLOPT_USERAGENT, 'SecretariaApp/1.0 PHP-cURL');
 
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -903,10 +910,10 @@ class ChatService
         $jsonData = json_encode($data);
         echo "event: $event\n";
         echo "data: $jsonData\n\n";
-        
+
         // Log para depuración
         error_log("SSE enviado - evento: $event, datos: " . substr($jsonData, 0, 100) . "...");
-        
+
         // Forzar envío inmediato
         if (ob_get_level() > 0) {
             ob_flush();
