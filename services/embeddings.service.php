@@ -198,7 +198,7 @@ class EmbeddingsService
     }
 
     /**
-     * Buscar por similitud en archivos
+     * Buscar por similitud en archivos (solo de actividades específicas)
      */
     public static function buscarArchivos($embeddingPregunta, $actividadesIds, $limitePorActividad = 3)
     {
@@ -240,6 +240,7 @@ class EmbeddingsService
                 
                 $archivosPorActividad[$row['actividad_id']][] = [
                     'id' => $row['id'],
+                    'actividad_id' => $row['actividad_id'],
                     'nombre_archivo' => $row['nombre_archivo'],
                     'archivo_url' => $row['archivo_url'],
                     'fecha_actividad' => $row['fecha_actividad'],
@@ -268,7 +269,69 @@ class EmbeddingsService
     }
 
     /**
-     * Realizar búsqueda semántica completa
+     * Buscar archivos en TODO el contrato (NUEVO MÉTODO)
+     */
+    public static function buscarArchivosTodos($embeddingPregunta, $contratoId, $limite = 20, $umbralSimilitud = 0.5)
+    {
+        try {
+            $db = Flight::db();
+
+            // Buscar en TODOS los archivos del contrato
+            $stmt = $db->prepare("
+                SELECT 
+                    aa.id,
+                    aa.actividad_id,
+                    aa.nombre_archivo,
+                    aa.archivo_url,
+                    aa.embeddings,
+                    aa.texto_extraido,
+                    a.fecha_actividad,
+                    a.descripcion_actividad
+                FROM actividades_archivos aa
+                INNER JOIN actividades a ON aa.actividad_id = a.id
+                WHERE a.contrato_id = :contrato_id
+                AND aa.embeddings IS NOT NULL
+                AND aa.procesado = 1
+            ");
+            $stmt->bindParam(':contrato_id', $contratoId);
+            $stmt->execute();
+
+            $archivosRelevantes = [];
+            while ($row = $stmt->fetch()) {
+                $similitud = self::calcularSimilitud($embeddingPregunta, $row['embeddings']);
+                
+                // Solo incluir si supera el umbral
+                if ($similitud >= $umbralSimilitud) {
+                    $archivosRelevantes[] = [
+                        'id' => $row['id'],
+                        'actividad_id' => $row['actividad_id'],
+                        'nombre_archivo' => $row['nombre_archivo'],
+                        'archivo_url' => $row['archivo_url'],
+                        'fecha_actividad' => $row['fecha_actividad'],
+                        'descripcion_actividad' => substr($row['descripcion_actividad'], 0, 100) . '...',
+                        'similitud' => $similitud,
+                        'texto_preview' => substr($row['texto_extraido'], 0, 300) . '...',
+                        'origen' => 'busqueda_directa' // Marcador para identificar origen
+                    ];
+                }
+            }
+
+            // Ordenar por similitud descendente
+            usort($archivosRelevantes, function($a, $b) {
+                return $b['similitud'] <=> $a['similitud'];
+            });
+
+            // Retornar solo el límite solicitado
+            return array_slice($archivosRelevantes, 0, $limite);
+
+        } catch (Exception $e) {
+            error_log("Error buscando todos los archivos: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Realizar búsqueda semántica completa (MODIFICADO)
      */
     public static function busquedaSemantica($pregunta, $contratoId, $modeloId = null)
     {
@@ -280,19 +343,27 @@ class EmbeddingsService
             // 2. Buscar actividades similares
             $actividadesRelevantes = self::buscarActividades($embeddingPregunta, $contratoId, 15);
 
-            // 3. Obtener IDs de actividades para buscar archivos
+            // 3. Obtener IDs de actividades para buscar archivos relacionados
             $actividadesIds = array_column($actividadesRelevantes, 'id');
 
-            // 4. Buscar archivos relacionados
-            $archivosRelevantes = self::buscarArchivos($embeddingPregunta, $actividadesIds, 3);
+            // 4. Buscar archivos de actividades relevantes
+            $archivosDeActividades = self::buscarArchivos($embeddingPregunta, $actividadesIds, 3);
 
-            // 5. Construir contexto para GPT-4
-            $contexto = self::construirContexto($actividadesRelevantes, $archivosRelevantes);
+            // 5. NUEVO: Buscar archivos en TODO el contrato
+            $archivosTodos = self::buscarArchivosTodos($embeddingPregunta, $contratoId, 15, 0.6);
+
+            // 6. Combinar y deduplicar archivos
+            $archivosRelevantes = self::combinarArchivos($archivosDeActividades, $archivosTodos);
+
+            // 7. Construir contexto mejorado para GPT-4
+            $contexto = self::construirContextoMejorado($actividadesRelevantes, $archivosDeActividades, $archivosTodos);
 
             return [
                 'embedding_pregunta' => $embeddingResult,
                 'actividades' => $actividadesRelevantes,
                 'archivos' => $archivosRelevantes,
+                'archivos_actividades' => $archivosDeActividades,
+                'archivos_directos' => $archivosTodos,
                 'contexto' => $contexto,
                 'total_resultados' => count($actividadesRelevantes) + count($archivosRelevantes)
             ];
@@ -304,46 +375,120 @@ class EmbeddingsService
     }
 
     /**
-     * Construir contexto para GPT-4
+     * Combinar y deduplicar archivos (NUEVO MÉTODO)
+     */
+    private static function combinarArchivos($archivosDeActividades, $archivosTodos)
+    {
+        $archivosMap = [];
+        
+        // Primero agregar archivos de actividades (tienen prioridad)
+        foreach ($archivosDeActividades as $archivo) {
+            $archivo['origen'] = 'actividad_relevante';
+            $archivosMap[$archivo['id']] = $archivo;
+        }
+        
+        // Luego agregar archivos de búsqueda directa (si no están ya)
+        foreach ($archivosTodos as $archivo) {
+            if (!isset($archivosMap[$archivo['id']])) {
+                $archivosMap[$archivo['id']] = $archivo;
+            }
+        }
+        
+        // Convertir a array y ordenar por similitud
+        $archivosFinales = array_values($archivosMap);
+        usort($archivosFinales, function($a, $b) {
+            return $b['similitud'] <=> $a['similitud'];
+        });
+        
+        return $archivosFinales;
+    }
+
+    /**
+     * Construir contexto mejorado para GPT-4 (NUEVO MÉTODO)
+     */
+    private static function construirContextoMejorado($actividades, $archivosDeActividades, $archivosTodos)
+    {
+        $contexto = "CONTEXTO DE BÚSQUEDA:\n\n";
+
+        // Sección 1: Actividades relevantes con sus archivos
+        if (!empty($actividades)) {
+            $contexto .= "=== ACTIVIDADES RELEVANTES ===\n\n";
+            
+            // Agrupar archivos por actividad
+            $archivosPorActividad = [];
+            foreach ($archivosDeActividades as $archivo) {
+                $actId = $archivo['actividad_id'] ?? null;
+                if ($actId) {
+                    if (!isset($archivosPorActividad[$actId])) {
+                        $archivosPorActividad[$actId] = [];
+                    }
+                    $archivosPorActividad[$actId][] = $archivo;
+                }
+            }
+
+            foreach ($actividades as $actividad) {
+                $contexto .= "--- Actividad del {$actividad['fecha_actividad']} ---\n";
+                $contexto .= "Descripción: {$actividad['descripcion_actividad']}\n";
+                $contexto .= "Relevancia: " . round($actividad['similitud'] * 100, 1) . "%\n";
+
+                // Agregar archivos de esta actividad
+                if (isset($archivosPorActividad[$actividad['id']])) {
+                    $contexto .= "\nArchivos adjuntos:\n";
+                    foreach ($archivosPorActividad[$actividad['id']] as $archivo) {
+                        $contexto .= "  • {$archivo['nombre_archivo']} (Relevancia: " . 
+                                    round($archivo['similitud'] * 100, 1) . "%)\n";
+                        if (isset($archivo['texto_preview'])) {
+                            $contexto .= "    Contenido: {$archivo['texto_preview']}\n";
+                        }
+                    }
+                }
+                $contexto .= "\n";
+            }
+        }
+
+        // Sección 2: Archivos encontrados por búsqueda directa
+        $archivosDirectosUnicos = [];
+        $idsYaIncluidos = array_column($archivosDeActividades, 'id');
+        
+        foreach ($archivosTodos as $archivo) {
+            if (!in_array($archivo['id'], $idsYaIncluidos)) {
+                $archivosDirectosUnicos[] = $archivo;
+            }
+        }
+
+        if (!empty($archivosDirectosUnicos)) {
+            $contexto .= "\n=== ARCHIVOS RELEVANTES ENCONTRADOS POR CONTENIDO ===\n";
+            $contexto .= "(Estos archivos contienen información relevante aunque sus actividades no lo sean)\n\n";
+
+            foreach ($archivosDirectosUnicos as $archivo) {
+                $contexto .= "--- Archivo: {$archivo['nombre_archivo']} ---\n";
+                $contexto .= "Fecha de actividad: {$archivo['fecha_actividad']}\n";
+                $contexto .= "Actividad asociada: {$archivo['descripcion_actividad']}\n";
+                $contexto .= "Relevancia del contenido: " . round($archivo['similitud'] * 100, 1) . "%\n";
+                $contexto .= "Contenido relevante: {$archivo['texto_preview']}\n\n";
+            }
+        }
+
+        // Sección 3: Resumen
+        $totalActividades = count($actividades);
+        $totalArchivos = count($archivosDeActividades) + count($archivosDirectosUnicos);
+        
+        $contexto .= "\n=== RESUMEN DE RESULTADOS ===\n";
+        $contexto .= "- Actividades relevantes encontradas: {$totalActividades}\n";
+        $contexto .= "- Archivos relevantes totales: {$totalArchivos}\n";
+        $contexto .= "  - Por actividades relevantes: " . count($archivosDeActividades) . "\n";
+        $contexto .= "  - Por búsqueda directa: " . count($archivosDirectosUnicos) . "\n";
+
+        return $contexto;
+    }
+
+    /**
+     * Construir contexto para GPT-4 (MANTENER PARA COMPATIBILIDAD)
      */
     private static function construirContexto($actividades, $archivos)
     {
-        $contexto = "CONTEXTO DE ACTIVIDADES RELEVANTES:\n\n";
-
-        // Agrupar archivos por actividad
-        $archivosPorActividad = [];
-        foreach ($archivos as $archivo) {
-            $actId = $archivo['actividad_id'] ?? null;
-            if ($actId) {
-                if (!isset($archivosPorActividad[$actId])) {
-                    $archivosPorActividad[$actId] = [];
-                }
-                $archivosPorActividad[$actId][] = $archivo;
-            }
-        }
-
-        // Construir contexto con actividades y sus archivos
-        foreach ($actividades as $actividad) {
-            $contexto .= "=== Actividad del {$actividad['fecha_actividad']} ===\n";
-            $contexto .= "Descripción: {$actividad['descripcion_actividad']}\n";
-            $contexto .= "Relevancia: " . round($actividad['similitud'] * 100, 1) . "%\n";
-
-            // Agregar archivos de esta actividad
-            if (isset($archivosPorActividad[$actividad['id']])) {
-                $contexto .= "\nArchivos relacionados:\n";
-                foreach ($archivosPorActividad[$actividad['id']] as $archivo) {
-                    $contexto .= "- {$archivo['nombre_archivo']} (Relevancia: " . 
-                                round($archivo['similitud'] * 100, 1) . "%)\n";
-                    if (isset($archivo['texto_preview'])) {
-                        $contexto .= "  Preview: {$archivo['texto_preview']}\n";
-                    }
-                }
-            }
-
-            $contexto .= "\n---\n\n";
-        }
-
-        return $contexto;
+        // Usar el nuevo método mejorado
+        return self::construirContextoMejorado($actividades, $archivos, []);
     }
 
     /**
