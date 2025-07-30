@@ -225,7 +225,6 @@ class ChatService
             self::enviarEventoSSE('done', ['success' => true]);
 
             error_log("=== FIN ChatService::iniciarConversacionStream ===");
-
         } catch (Exception $e) {
             error_log("ERROR CRÍTICO en chat streaming: " . $e->getMessage());
             error_log("Stack trace: " . $e->getTraceAsString());
@@ -605,14 +604,31 @@ class ChatService
      */
     private static function construirMensajes($historial, $contexto, $preguntaActual)
     {
+        $systemPrompt = 'Eres un asistente especializado en analizar EXCLUSIVAMENTE las actividades, documentos y obligaciones del contrato específico que se te proporciona.
+
+                        INSTRUCCIONES CRÍTICAS:
+                        1. SOLO debes responder basándote en la información del contrato y sus actividades proporcionadas en el contexto.
+                        2. Si la pregunta NO está relacionada con el contrato, actividades, documentos u obligaciones, debes responder: "Solo puedo ayudarte con información relacionada con el contrato, sus actividades, documentos y obligaciones. ¿Hay algo específico del contrato sobre lo que necesites información?"
+                        3. SIEMPRE cita las fuentes exactas (fecha de actividad, nombre de archivo) cuando encuentres información.
+                        4. Si no encuentras información específica en el contexto proporcionado, indica claramente que no se encontró esa información en las actividades del contrato.
+                        5. NO proporciones información general o conocimientos externos que no estén en el contexto del contrato.
+                        6. Mantén las respuestas concisas, profesionales y enfocadas en el contrato.
+
+                        VALIDACIÓN DE RELEVANCIA:
+                        Antes de responder, evalúa si la pregunta está relacionada con:
+                        - El contrato específico y sus detalles
+                        - Las actividades registradas
+                        - Los documentos adjuntos
+                        - Las obligaciones contractuales
+                        - El contratista o la entidad mencionados
+                        - Fechas, reuniones o eventos del contrato
+
+                        Si la pregunta NO está relacionada con estos temas, aplica la respuesta estándar del punto 2.';
+
         $messages = [
             [
                 'role' => 'system',
-                'content' => 'Eres un asistente especializado en analizar contratos y actividades. 
-                            Tienes acceso a información específica del contrato y sus actividades.
-                            Siempre citas las fuentes exactas (fecha de actividad, nombre de archivo).
-                            Respondes de forma clara, concisa y profesional.
-                            Si no encuentras información específica, lo indicas claramente.'
+                'content' => $systemPrompt
             ]
         ];
 
