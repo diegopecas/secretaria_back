@@ -296,8 +296,8 @@ class ActividadesService
                         // Obtener descripción de las obligaciones
                         $placeholders = array_fill(0, count($obligaciones), '?');
                         $sqlOblig = "SELECT numero_obligacion, descripcion 
-                                    FROM obligaciones_contractuales 
-                                    WHERE id IN (" . implode(',', $placeholders) . ")";
+                    FROM obligaciones_contractuales 
+                    WHERE id IN (" . implode(',', $placeholders) . ")";
                         $stmtOblig = $db->prepare($sqlOblig);
                         $stmtOblig->execute($obligaciones);
 
@@ -308,9 +308,11 @@ class ActividadesService
 
                     error_log("Texto completo longitud: " . strlen($textoCompleto));
 
-                    // Generar embedding SOLO de descripción + obligaciones
-                    error_log("Llamando a EmbeddingsService::generar()...");
-                    $embeddingResult = EmbeddingsService::generar($textoCompleto, $embedding_modelo_id);
+                    // CAMBIAR ESTA LÍNEA:
+                    // $embeddingResult = EmbeddingsService::generar($textoCompleto, $embedding_modelo_id);
+
+                    // POR ESTA:
+                    $embeddingResult = EmbeddingsService::generar($textoCompleto, $contrato_id);
 
                     error_log("Embedding generado exitosamente:");
                     error_log("- Modelo ID: " . $embeddingResult['modelo_id']);
@@ -319,15 +321,14 @@ class ActividadesService
                     // Actualizar actividad con embedding
                     $embeddingJson = json_encode($embeddingResult['vector']);
 
+                    // CAMBIAR ESTA CONSULTA - YA NO NECESITAMOS embeddings_modelo_id:
                     $stmtUpdate = $db->prepare("
                         UPDATE actividades 
                         SET embeddings = :embeddings,
-                            embeddings_modelo_id = :modelo_id,
                             procesado_ia = 1
                         WHERE id = :id
                     ");
                     $stmtUpdate->bindParam(':embeddings', $embeddingJson);
-                    $stmtUpdate->bindParam(':modelo_id', $embeddingResult['modelo_id']);
                     $stmtUpdate->bindParam(':id', $actividadId);
                     $stmtUpdate->execute();
 
@@ -335,7 +336,6 @@ class ActividadesService
                 } catch (Exception $e) {
                     error_log("ERROR generando embedding: " . $e->getMessage());
                 }
-
                 $db->commit();
 
                 responderJSON([
@@ -476,11 +476,11 @@ class ActividadesService
 
                         // Obtener obligaciones actuales de la actividad
                         $stmtObligActuales = $db->prepare("
-                            SELECT oc.numero_obligacion, oc.descripcion
-                            FROM actividades_obligaciones ao
-                            INNER JOIN obligaciones_contractuales oc ON ao.obligacion_id = oc.id
-                            WHERE ao.actividad_id = :actividad_id
-                        ");
+            SELECT oc.numero_obligacion, oc.descripcion
+            FROM actividades_obligaciones ao
+            INNER JOIN obligaciones_contractuales oc ON ao.obligacion_id = oc.id
+            WHERE ao.actividad_id = :actividad_id
+        ");
                         $stmtObligActuales->bindParam(':actividad_id', $id);
                         $stmtObligActuales->execute();
 
@@ -491,27 +491,33 @@ class ActividadesService
                             }
                         }
 
-                        // Generar nuevo embedding (SIN incluir archivos)
-                        $embedding_modelo_id = $_POST['embedding_modelo_id'] ?? null;
-                        $embeddingResult = EmbeddingsService::generar($textoCompleto, $embedding_modelo_id);
+                        // CAMBIAR ESTA LÍNEA:
+                        // $embedding_modelo_id = $_POST['embedding_modelo_id'] ?? null;
+                        // $embeddingResult = EmbeddingsService::generar($textoCompleto, $embedding_modelo_id);
 
-                        // Actualizar actividad con nuevo embedding
+                        // POR ESTAS:
+                        // Obtener el contrato_id de la actividad
+                        $stmtContrato = $db->prepare("SELECT contrato_id FROM actividades WHERE id = :id");
+                        $stmtContrato->bindParam(':id', $id);
+                        $stmtContrato->execute();
+                        $actividadData = $stmtContrato->fetch();
+
+                        $embeddingResult = EmbeddingsService::generar($textoCompleto, $actividadData['contrato_id']);
+
+                        // CAMBIAR ESTA CONSULTA - YA NO NECESITAMOS embeddings_modelo_id:
                         $stmtUpdate = $db->prepare("
-                            UPDATE actividades 
-                            SET embeddings = :embeddings,
-                                embeddings_modelo_id = :modelo_id,
-                                procesado_ia = 1
-                            WHERE id = :id
-                        ");
+            UPDATE actividades 
+            SET embeddings = :embeddings,
+                procesado_ia = 1
+            WHERE id = :id
+        ");
                         $stmtUpdate->bindParam(':embeddings', json_encode($embeddingResult['vector']));
-                        $stmtUpdate->bindParam(':modelo_id', $embeddingResult['modelo_id']);
                         $stmtUpdate->bindParam(':id', $id);
                         $stmtUpdate->execute();
                     } catch (Exception $e) {
                         error_log("Error regenerando embedding: " . $e->getMessage());
                     }
                 }
-
                 $db->commit();
 
                 responderJSON([

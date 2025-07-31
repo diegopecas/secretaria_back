@@ -4,48 +4,52 @@ class EmbeddingsService
     /**
      * Generar embedding para un texto
      */
-    public static function generar($texto, $modeloId = null)
+    public static function generar($texto, $contratoId = null)
     {
         try {
             error_log("EmbeddingsService::generar() - INICIO");
             error_log("- Texto longitud: " . strlen($texto));
-            error_log("- Modelo ID solicitado: " . ($modeloId ?? 'DEFAULT'));
-            
-            $tiempoInicio = microtime(true); // Para medir tiempo de respuesta
-            
+            error_log("- Contrato ID: " . ($contratoId ?? 'No especificado'));
+
+            $tiempoInicio = microtime(true);
+
             if (empty($texto)) {
                 throw new Exception('Texto vacío, no se puede generar embedding');
             }
 
             $db = Flight::db();
+            $modelo = null;
 
-            // Obtener modelo de embeddings
-            if (!$modeloId) {
-                error_log("Buscando modelo predeterminado...");
-                // Usar modelo predeterminado
+            // Si se proporciona contrato_id, usar su modelo
+            if ($contratoId) {
                 $stmt = $db->prepare("
-                    SELECT im.* 
-                    FROM ia_modelos im
-                    INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
-                    WHERE tm.codigo = 'embedding' 
-                    AND im.activo = 1 
-                    AND im.es_predeterminado = 1
-                    LIMIT 1
-                ");
+                SELECT c.embeddings_modelo_id, im.*
+                FROM contratos c
+                LEFT JOIN ia_modelos im ON c.embeddings_modelo_id = im.id
+                WHERE c.id = :contrato_id
+            ");
+                $stmt->bindParam(':contrato_id', $contratoId);
                 $stmt->execute();
-                $modelo = $stmt->fetch();
-            } else {
-                error_log("Buscando modelo específico ID: " . $modeloId);
-                // Usar modelo específico
+                $resultado = $stmt->fetch();
+
+                if ($resultado && $resultado['embeddings_modelo_id']) {
+                    $modelo = $resultado;
+                    error_log("Usando modelo del contrato: ID " . $modelo['id'] . " - " . $modelo['modelo']);
+                }
+            }
+
+            // Si no hay modelo del contrato, usar el predeterminado
+            if (!$modelo) {
+                error_log("Buscando modelo predeterminado...");
                 $stmt = $db->prepare("
-                    SELECT im.* 
-                    FROM ia_modelos im
-                    INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
-                    WHERE im.id = :modelo_id 
-                    AND tm.codigo = 'embedding' 
-                    AND im.activo = 1
-                ");
-                $stmt->bindParam(':modelo_id', $modeloId);
+                SELECT im.* 
+                FROM ia_modelos im
+                INNER JOIN tipos_modelo_ia tm ON im.tipo_modelo_id = tm.id
+                WHERE tm.codigo = 'embedding' 
+                AND im.activo = 1 
+                AND im.es_predeterminado = 1
+                LIMIT 1
+            ");
                 $stmt->execute();
                 $modelo = $stmt->fetch();
             }
@@ -67,17 +71,32 @@ class EmbeddingsService
             require_once __DIR__ . '/../providers/ai/provider-manager.php';
             $providerManager = ProviderManager::getInstance();
 
-            if (!$providerManager->hasProvider($modelo['proveedor'])) {
+            // Verificar si hay configuración específica del contrato
+            $configuracionContrato = null;
+            if ($contratoId) {
+                require_once __DIR__ . '/contratos-ia-config.service.php';
+                $configuracionContrato = ContratosIAConfigService::obtenerConfiguracionInterna($contratoId, $modelo['proveedor']);
+
+                if ($configuracionContrato) {
+                    error_log("Usando configuración específica del contrato");
+                    // Aquí podrías pasar la configuración al provider si es necesario
+                }
+            }
+
+            if (!$providerManager->hasProvider($modelo['proveedor'], $contratoId)) {
                 error_log("ERROR: Provider no disponible: " . $modelo['proveedor']);
                 throw new Exception("Provider {$modelo['proveedor']} no configurado");
             }
 
-            error_log("Obteniendo provider: " . $modelo['proveedor']);
-            $provider = $providerManager->getProvider($modelo['proveedor']);
-            
+            error_log("Obteniendo provider: " . $modelo['proveedor'] . " para contrato: " . ($contratoId ?? 'global'));
+            $provider = $providerManager->getProvider($modelo['proveedor'], $contratoId);
+
             error_log("Llamando a generarEmbeddings()...");
             $embedding = $provider->generarEmbeddings($texto);
-            
+
+            error_log("Llamando a generarEmbeddings()...");
+            $embedding = $provider->generarEmbeddings($texto);
+
             error_log("Embedding recibido. Dimensiones: " . count($embedding));
             error_log("Primeros valores: " . implode(', ', array_slice($embedding, 0, 5)) . "...");
 
@@ -90,12 +109,12 @@ class EmbeddingsService
                 'modelo' => $modelo['modelo'],
                 'proveedor' => $modelo['proveedor'],
                 'dimensiones' => count($embedding),
-                'tokens_estimados' => self::estimarTokens($texto)
+                'tokens_estimados' => self::estimarTokens($texto),
+                'contrato_id' => $contratoId
             ];
-            
+
             error_log("EmbeddingsService::generar() - FIN EXITOSO");
             return $resultado;
-
         } catch (Exception $e) {
             error_log("ERROR en EmbeddingsService::generar(): " . $e->getMessage());
             error_log("Stack trace: " . $e->getTraceAsString());
@@ -161,8 +180,7 @@ class EmbeddingsService
                     id,
                     fecha_actividad,
                     descripcion_actividad,
-                    embeddings,
-                    embeddings_modelo_id
+                    embeddings
                 FROM actividades
                 WHERE contrato_id = :contrato_id
                 AND embeddings IS NOT NULL
@@ -184,13 +202,12 @@ class EmbeddingsService
             }
 
             // Ordenar por similitud descendente
-            usort($actividades, function($a, $b) {
+            usort($actividades, function ($a, $b) {
                 return $b['similitud'] <=> $a['similitud'];
             });
 
             // Retornar solo el límite solicitado
             return array_slice($actividades, 0, $limite);
-
         } catch (Exception $e) {
             error_log("Error buscando actividades: " . $e->getMessage());
             throw $e;
@@ -233,11 +250,11 @@ class EmbeddingsService
             $archivosPorActividad = [];
             while ($row = $stmt->fetch()) {
                 $similitud = self::calcularSimilitud($embeddingPregunta, $row['embeddings']);
-                
+
                 if (!isset($archivosPorActividad[$row['actividad_id']])) {
                     $archivosPorActividad[$row['actividad_id']] = [];
                 }
-                
+
                 $archivosPorActividad[$row['actividad_id']][] = [
                     'id' => $row['id'],
                     'actividad_id' => $row['actividad_id'],
@@ -252,16 +269,15 @@ class EmbeddingsService
             // Ordenar archivos por similitud y limitar por actividad
             $archivosFinales = [];
             foreach ($archivosPorActividad as $actividadId => $archivos) {
-                usort($archivos, function($a, $b) {
+                usort($archivos, function ($a, $b) {
                     return $b['similitud'] <=> $a['similitud'];
                 });
-                
+
                 $archivosLimitados = array_slice($archivos, 0, $limitePorActividad);
                 $archivosFinales = array_merge($archivosFinales, $archivosLimitados);
             }
 
             return $archivosFinales;
-
         } catch (Exception $e) {
             error_log("Error buscando archivos: " . $e->getMessage());
             throw $e;
@@ -299,7 +315,7 @@ class EmbeddingsService
             $archivosRelevantes = [];
             while ($row = $stmt->fetch()) {
                 $similitud = self::calcularSimilitud($embeddingPregunta, $row['embeddings']);
-                
+
                 // Solo incluir si supera el umbral
                 if ($similitud >= $umbralSimilitud) {
                     $archivosRelevantes[] = [
@@ -317,13 +333,12 @@ class EmbeddingsService
             }
 
             // Ordenar por similitud descendente
-            usort($archivosRelevantes, function($a, $b) {
+            usort($archivosRelevantes, function ($a, $b) {
                 return $b['similitud'] <=> $a['similitud'];
             });
 
             // Retornar solo el límite solicitado
             return array_slice($archivosRelevantes, 0, $limite);
-
         } catch (Exception $e) {
             error_log("Error buscando todos los archivos: " . $e->getMessage());
             throw $e;
@@ -336,8 +351,8 @@ class EmbeddingsService
     public static function busquedaSemantica($pregunta, $contratoId, $modeloId = null)
     {
         try {
-            // 1. Generar embedding de la pregunta
-            $embeddingResult = self::generar($pregunta, $modeloId);
+            // 1. Generar embedding de la pregunta usando el modelo del contrato
+            $embeddingResult = self::generar($pregunta, $contratoId);
             $embeddingPregunta = $embeddingResult['vector'];
 
             // 2. Buscar actividades similares
@@ -349,14 +364,23 @@ class EmbeddingsService
             // 4. Buscar archivos de actividades relevantes
             $archivosDeActividades = self::buscarArchivos($embeddingPregunta, $actividadesIds, 3);
 
-            // 5. NUEVO: Buscar archivos en TODO el contrato
+            // 5. Buscar archivos en TODO el contrato
             $archivosTodos = self::buscarArchivosTodos($embeddingPregunta, $contratoId, 15, 0.6);
 
-            // 6. Combinar y deduplicar archivos
+            // 6. NUEVO: Buscar obligaciones similares
+            require_once __DIR__ . '/obligaciones.service.php';
+            $obligacionesRelevantes = ObligacionesService::buscarPorSimilitud($embeddingPregunta, $contratoId, 10);
+
+            // 7. Combinar y deduplicar archivos
             $archivosRelevantes = self::combinarArchivos($archivosDeActividades, $archivosTodos);
 
-            // 7. Construir contexto mejorado para GPT-4
-            $contexto = self::construirContextoMejorado($actividadesRelevantes, $archivosDeActividades, $archivosTodos);
+            // 8. Construir contexto mejorado para GPT-4 (incluyendo obligaciones)
+            $contexto = self::construirContextoMejorado(
+                $actividadesRelevantes,
+                $archivosDeActividades,
+                $archivosTodos,
+                $obligacionesRelevantes
+            );
 
             return [
                 'embedding_pregunta' => $embeddingResult,
@@ -364,10 +388,10 @@ class EmbeddingsService
                 'archivos' => $archivosRelevantes,
                 'archivos_actividades' => $archivosDeActividades,
                 'archivos_directos' => $archivosTodos,
+                'obligaciones' => $obligacionesRelevantes,
                 'contexto' => $contexto,
-                'total_resultados' => count($actividadesRelevantes) + count($archivosRelevantes)
+                'total_resultados' => count($actividadesRelevantes) + count($archivosRelevantes) + count($obligacionesRelevantes)
             ];
-
         } catch (Exception $e) {
             error_log("Error en búsqueda semántica: " . $e->getMessage());
             throw $e;
@@ -380,40 +404,53 @@ class EmbeddingsService
     private static function combinarArchivos($archivosDeActividades, $archivosTodos)
     {
         $archivosMap = [];
-        
+
         // Primero agregar archivos de actividades (tienen prioridad)
         foreach ($archivosDeActividades as $archivo) {
             $archivo['origen'] = 'actividad_relevante';
             $archivosMap[$archivo['id']] = $archivo;
         }
-        
+
         // Luego agregar archivos de búsqueda directa (si no están ya)
         foreach ($archivosTodos as $archivo) {
             if (!isset($archivosMap[$archivo['id']])) {
                 $archivosMap[$archivo['id']] = $archivo;
             }
         }
-        
+
         // Convertir a array y ordenar por similitud
         $archivosFinales = array_values($archivosMap);
-        usort($archivosFinales, function($a, $b) {
+        usort($archivosFinales, function ($a, $b) {
             return $b['similitud'] <=> $a['similitud'];
         });
-        
+
         return $archivosFinales;
     }
 
     /**
      * Construir contexto mejorado para GPT-4 (NUEVO MÉTODO)
      */
-    private static function construirContextoMejorado($actividades, $archivosDeActividades, $archivosTodos)
+    private static function construirContextoMejorado($actividades, $archivosDeActividades, $archivosTodos, $obligaciones = [])
     {
         $contexto = "CONTEXTO DE BÚSQUEDA:\n\n";
 
-        // Sección 1: Actividades relevantes con sus archivos
+        // Sección 1: Obligaciones relevantes (NUEVO)
+        if (!empty($obligaciones)) {
+            $contexto .= "=== OBLIGACIONES CONTRACTUALES RELEVANTES ===\n\n";
+
+            foreach ($obligaciones as $obligacion) {
+                if ($obligacion['similitud'] >= 0.5) { // Solo incluir si es relevante
+                    $contexto .= "--- Obligación {$obligacion['numero_obligacion']} ---\n";
+                    $contexto .= "Descripción: {$obligacion['descripcion']}\n";
+                    $contexto .= "Relevancia: " . round($obligacion['similitud'] * 100, 1) . "%\n\n";
+                }
+            }
+        }
+
+        // Sección 2: Actividades relevantes con sus archivos
         if (!empty($actividades)) {
             $contexto .= "=== ACTIVIDADES RELEVANTES ===\n\n";
-            
+
             // Agrupar archivos por actividad
             $archivosPorActividad = [];
             foreach ($archivosDeActividades as $archivo) {
@@ -435,8 +472,8 @@ class EmbeddingsService
                 if (isset($archivosPorActividad[$actividad['id']])) {
                     $contexto .= "\nArchivos adjuntos:\n";
                     foreach ($archivosPorActividad[$actividad['id']] as $archivo) {
-                        $contexto .= "  • {$archivo['nombre_archivo']} (Relevancia: " . 
-                                    round($archivo['similitud'] * 100, 1) . "%)\n";
+                        $contexto .= "  • {$archivo['nombre_archivo']} (Relevancia: " .
+                            round($archivo['similitud'] * 100, 1) . "%)\n";
                         if (isset($archivo['texto_preview'])) {
                             $contexto .= "    Contenido: {$archivo['texto_preview']}\n";
                         }
@@ -446,10 +483,10 @@ class EmbeddingsService
             }
         }
 
-        // Sección 2: Archivos encontrados por búsqueda directa
+        // Sección 3: Archivos encontrados por búsqueda directa
         $archivosDirectosUnicos = [];
         $idsYaIncluidos = array_column($archivosDeActividades, 'id');
-        
+
         foreach ($archivosTodos as $archivo) {
             if (!in_array($archivo['id'], $idsYaIncluidos)) {
                 $archivosDirectosUnicos[] = $archivo;
@@ -469,11 +506,15 @@ class EmbeddingsService
             }
         }
 
-        // Sección 3: Resumen
+        // Sección 4: Resumen
         $totalActividades = count($actividades);
         $totalArchivos = count($archivosDeActividades) + count($archivosDirectosUnicos);
-        
+        $totalObligaciones = count(array_filter($obligaciones, function ($o) {
+            return $o['similitud'] >= 0.5;
+        }));
+
         $contexto .= "\n=== RESUMEN DE RESULTADOS ===\n";
+        $contexto .= "- Obligaciones relevantes: {$totalObligaciones}\n";
         $contexto .= "- Actividades relevantes encontradas: {$totalActividades}\n";
         $contexto .= "- Archivos relevantes totales: {$totalArchivos}\n";
         $contexto .= "  - Por actividades relevantes: " . count($archivosDeActividades) . "\n";
@@ -481,7 +522,6 @@ class EmbeddingsService
 
         return $contexto;
     }
-
     /**
      * Construir contexto para GPT-4 (MANTENER PARA COMPATIBILIDAD)
      */
@@ -506,14 +546,14 @@ class EmbeddingsService
     private static function truncarTexto($texto, $limiteTokens)
     {
         $tokensEstimados = self::estimarTokens($texto);
-        
+
         if ($tokensEstimados <= $limiteTokens) {
             return $texto;
         }
 
         // Calcular caracteres máximos (dejando margen de seguridad)
         $caracteresMax = ($limiteTokens * 4) * 0.9; // 90% del límite
-        
+
         return substr($texto, 0, $caracteresMax) . '...';
     }
 
@@ -524,15 +564,15 @@ class EmbeddingsService
     {
         try {
             $db = Flight::db();
-            
+
             $tokensEstimados = self::estimarTokens($caracteresTexto);
-            
+
             // Obtener costo del modelo
             $stmt = $db->prepare("SELECT costo_por_1k_tokens FROM ia_modelos WHERE id = :id");
             $stmt->bindParam(':id', $modeloId);
             $stmt->execute();
             $modelo = $stmt->fetch();
-            
+
             $costo = 0;
             if ($modelo && $modelo['costo_por_1k_tokens']) {
                 $costo = ($tokensEstimados / 1000) * $modelo['costo_por_1k_tokens'];
@@ -572,14 +612,13 @@ class EmbeddingsService
                     NOW()
                 )
             ");
-            
+
             $stmt->bindParam(':modelo_id', $modeloId);
             $stmt->bindParam(':tokens_entrada', $tokensEstimados);
             $stmt->bindParam(':tokens_total', $tokensEstimados);
             $stmt->bindParam(':costo', $costo);
             $stmt->bindParam(':tiempo_respuesta', $tiempoRespuesta);
             $stmt->execute();
-            
         } catch (Exception $e) {
             error_log("Error registrando uso de embedding: " . $e->getMessage());
             // No lanzar excepción para no interrumpir el proceso principal
@@ -593,54 +632,57 @@ class EmbeddingsService
     {
         try {
             $db = Flight::db();
-            
+
             // Obtener actividades pendientes
             $stmt = $db->prepare("
-                SELECT id, descripcion_actividad
-                FROM actividades
-                WHERE procesado_ia = 0
-                AND descripcion_actividad IS NOT NULL
-                ORDER BY fecha_registro DESC
+                SELECT 
+                    a.id, 
+                    a.descripcion_actividad,
+                    a.contrato_id  -- AGREGAR ESTE CAMPO
+                FROM actividades a
+                WHERE a.procesado_ia = 0
+                AND a.descripcion_actividad IS NOT NULL
+                ORDER BY a.fecha_registro DESC
                 LIMIT :limite
             ");
             $stmt->bindParam(':limite', $limite, PDO::PARAM_INT);
             $stmt->execute();
-            
+
             $procesadas = 0;
             $errores = 0;
-            
+
             while ($actividad = $stmt->fetch()) {
                 try {
                     // Generar embedding
-                    $resultado = self::generar($actividad['descripcion_actividad']);
-                    
-                    // Actualizar actividad
+                    // CAMBIAR ESTA LÍNEA:
+                    // $resultado = self::generar($actividad['descripcion_actividad']);
+
+                    // POR ESTA:
+                    $resultado = self::generar($actividad['descripcion_actividad'], $actividad['contrato_id']);
+
+                    // CAMBIAR ESTA CONSULTA - YA NO INCLUIR embeddings_modelo_id:
                     $update = $db->prepare("
                         UPDATE actividades 
                         SET embeddings = :embeddings,
-                            embeddings_modelo_id = :modelo_id,
                             procesado_ia = 1
                         WHERE id = :id
                     ");
                     $update->execute([
                         ':embeddings' => json_encode($resultado['vector']),
-                        ':modelo_id' => $resultado['modelo_id'],
                         ':id' => $actividad['id']
                     ]);
-                    
+
                     $procesadas++;
-                    
                 } catch (Exception $e) {
                     error_log("Error procesando actividad {$actividad['id']}: " . $e->getMessage());
                     $errores++;
                 }
             }
-            
+
             return [
                 'procesadas' => $procesadas,
                 'errores' => $errores
             ];
-            
         } catch (Exception $e) {
             error_log("Error procesando pendientes: " . $e->getMessage());
             throw $e;

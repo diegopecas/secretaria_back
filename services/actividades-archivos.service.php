@@ -83,7 +83,7 @@ class ActividadesArchivosService
                     ct.id as contratista_id,
                     ct.nombre_completo,
                     a.fecha_actividad,
-                    a.embeddings_modelo_id
+                    c.embeddings_modelo_id 
                 FROM actividades a
                 INNER JOIN contratos c ON a.contrato_id = c.id
                 INNER JOIN contratistas ct ON c.contratista_id = ct.id
@@ -196,30 +196,29 @@ class ActividadesArchivosService
                 try {
                     error_log("=== INICIO GENERACIÓN EMBEDDINGS ARCHIVO {$archivoInfo['id']} ===");
                     error_log("Texto ya extraído, longitud: " . strlen($textoExtraido));
-                    
+
                     require_once __DIR__ . '/embeddings.service.php';
-                    
-                    // Usar el modelo de la actividad
-                    $embedding_modelo_id = $info['embeddings_modelo_id'] ?? null;
-                    error_log("Modelo ID de la actividad: " . ($embedding_modelo_id ?? 'DEFAULT'));
-                    
-                    // Generar embedding del texto ya extraído
-                    $embeddingResult = EmbeddingsService::generar($textoExtraido, $embedding_modelo_id);
-                    
+
+                    // POR ESTAS:
+                    $contrato_id = $info['contrato_id'];
+                    error_log("Contrato ID: " . $contrato_id);
+
+                    $embeddingResult = EmbeddingsService::generar($textoExtraido, $contrato_id);
+
                     error_log("Embedding generado exitosamente:");
                     error_log("- Modelo: " . $embeddingResult['modelo']);
                     error_log("- Dimensiones: " . $embeddingResult['dimensiones']);
 
                     // Actualizar archivo con embedding
                     $stmtUpdate = $db->prepare("
-                    UPDATE actividades_archivos 
-                    SET embeddings = :embeddings,
-                        modelo_extraccion_id = :modelo_id,
-                        estado_extraccion = 'completado',
-                        procesado = 1,
-                        fecha_procesamiento = NOW()
-                    WHERE id = :id
-                ");
+            UPDATE actividades_archivos 
+            SET embeddings = :embeddings,
+                modelo_extraccion_id = :modelo_id,
+                estado_extraccion = 'completado',
+                procesado = 1,
+                fecha_procesamiento = NOW()
+            WHERE id = :id
+        ");
 
                     $embeddingJson = json_encode($embeddingResult['vector']);
                     $stmtUpdate->bindParam(':embeddings', $embeddingJson);
@@ -233,8 +232,6 @@ class ActividadesArchivosService
                     error_log("ERROR generando embedding archivo {$archivoInfo['id']}:");
                     error_log("- Mensaje: " . $e->getMessage());
                     error_log("- Stack: " . $e->getTraceAsString());
-                    // No lanzar el error para no interrumpir el proceso
-                    // El archivo queda pendiente para procesar después
                 }
             } else {
                 error_log("Archivo {$archivoInfo['id']} sin texto extraído, queda pendiente");
@@ -759,22 +756,20 @@ class ActividadesArchivosService
 
                 if ($textoExtraido) {
                     // Generar embedding
-                    // Obtener el modelo de la actividad o usar el predeterminado
-                    $stmtModelo = $db->prepare("
-                        SELECT embeddings_modelo_id 
+                    $stmtContrato = $db->prepare("
+                        SELECT contrato_id 
                         FROM actividades 
                         WHERE id = :actividad_id
                     ");
-                    $stmtModelo->bindParam(':actividad_id', $actividadId);
-                    $stmtModelo->execute();
-                    $actividadModelo = $stmtModelo->fetch();
+                    $stmtContrato->bindParam(':actividad_id', $archivo['actividad_id']);
+                    $stmtContrato->execute();
+                    $actividadData = $stmtContrato->fetch();
 
-                    $modelo_id = $actividadModelo['embeddings_modelo_id'] ?? null;
                     try {
                         error_log("=== INICIO EMBEDDING ARCHIVO ===");
                         error_log("Texto a procesar (primeros 100 chars): " . substr($textoExtraido, 0, 100));
 
-                        $embeddingResult = EmbeddingsService::generar($textoExtraido, $modelo_id);
+                        $embeddingResult = EmbeddingsService::generar($textoExtraido, $actividadData['contrato_id']);
 
                         error_log("Embedding generado exitosamente");
                         error_log("- Modelo: " . $embeddingResult['modelo']);
@@ -784,8 +779,6 @@ class ActividadesArchivosService
                         error_log("ERROR CRÍTICO en embedding:");
                         error_log("- Error: " . $e->getMessage());
                         error_log("- Trace: " . $e->getTraceAsString());
-
-                        // Re-lanzar para ver el error completo
                         throw $e;
                     }
 

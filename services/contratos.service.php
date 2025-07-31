@@ -50,6 +50,7 @@ class ContratosService
                     c.dependencia,
                     c.unidad_operativa,
                     c.estado,
+                    c.embeddings_modelo_id,
                     DATEDIFF(c.fecha_terminacion, CURDATE()) as dias_restantes,
                     (SELECT COUNT(*) FROM obligaciones_contractuales WHERE contrato_id = c.id AND activo = 1) as total_obligaciones,
                     (SELECT COUNT(*) FROM contratos_supervisores WHERE contrato_id = c.id AND activo = 1) as total_supervisores
@@ -103,10 +104,14 @@ class ContratosService
                     ct.telefono as contratista_telefono,
                     e.nombre as entidad_nombre,
                     e.identificacion as entidad_identificacion,
+                    c.embeddings_modelo_id,
+                    im.modelo as embeddings_modelo_nombre,
+                    im.proveedor as embeddings_modelo_proveedor,
                     DATEDIFF(c.fecha_terminacion, CURDATE()) as dias_restantes
                 FROM contratos c
                 INNER JOIN contratistas ct ON c.contratista_id = ct.id
                 INNER JOIN entidades e ON c.entidad_id = e.id
+                LEFT JOIN ia_modelos im ON c.embeddings_modelo_id = im.id
                 WHERE c.id = :id
             ");
             $sentence->bindParam(':id', $id);
@@ -205,7 +210,7 @@ class ContratosService
             $fecha_terminacion = $data['fecha_terminacion'] ?? null;
             $objeto_contrato = $data['objeto_contrato'] ?? null;
             $valor_total = $data['valor_total'] ?? null;
-
+            $embeddings_modelo_id = $data['embeddings_modelo_id'] ?? null;
             if (
                 !$numero_contrato || !$contratista_id || !$entidad_id ||
                 !$fecha_suscripcion || !$fecha_inicio || !$fecha_terminacion ||
@@ -254,6 +259,7 @@ class ContratosService
                         valor_total,
                         dependencia,
                         unidad_operativa,
+                        embeddings_modelo_id,
                         estado
                     ) VALUES (
                         :numero_contrato,
@@ -267,6 +273,7 @@ class ContratosService
                         :valor_total,
                         :dependencia,
                         :unidad_operativa,
+                        :embeddings_modelo_id,
                         :estado
                     )
                 ");
@@ -283,7 +290,7 @@ class ContratosService
                 $sentence->bindParam(':dependencia', $dependencia);
                 $sentence->bindParam(':unidad_operativa', $unidad_operativa);
                 $sentence->bindParam(':estado', $estado);
-
+                $sentence->bindParam(':embeddings_modelo_id', $embeddings_modelo_id);
                 $sentence->execute();
                 $contratoId = $db->lastInsertId();
 
@@ -495,7 +502,10 @@ class ContratosService
                     $updates[] = "plazo_dias = :plazo_dias";
                     $params[':plazo_dias'] = $plazo_dias;
                 }
-
+                if (isset($data['embeddings_modelo_id'])) {
+                    $updates[] = "embeddings_modelo_id = :embeddings_modelo_id";
+                    $params[':embeddings_modelo_id'] = $data['embeddings_modelo_id'];
+                }
                 // Otros campos
                 $camposActualizables = [
                     'fecha_suscripcion',
