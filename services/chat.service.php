@@ -89,97 +89,73 @@ class ChatService
         }
     }
 
-    /**
-     * Iniciar conversación con streaming
-     */
     public static function iniciarConversacionStream()
     {
-        // CRÍTICO: Configurar headers SSE INMEDIATAMENTE
+        // Headers SSE - solo cambiar el origen si es necesario
         header('Content-Type: text/event-stream');
         header('Cache-Control: no-cache');
         header('Connection: keep-alive');
-        header('Access-Control-Allow-Origin: http://localhost:4200');
+        header('Access-Control-Allow-Origin: http://localhost:4200'); // TODO: Hacer dinámico en producción
         header('Access-Control-Allow-Credentials: true');
-        header('X-Accel-Buffering: no'); // Para nginx
+        header('X-Accel-Buffering: no');
 
-        // Deshabilitar buffering ANTES de cualquier salida
+        // Deshabilitar buffering
         @ob_end_clean();
         @ob_implicit_flush(true);
         @ini_set('output_buffering', 'off');
         @ini_set('zlib.output_compression', false);
 
-        // Flush inicial para establecer la conexión
+        // Flush inicial
         echo ":ok\n\n";
         flush();
 
         try {
             error_log("=== INICIO ChatService::iniciarConversacionStream ===");
 
-            // Verificar autenticación por token en query
+            // Verificar autenticación por token
             $token = $_GET['token'] ?? null;
-            error_log("Token recibido: " . ($token ? substr($token, 0, 20) . '...' : 'NO TOKEN'));
-
             if (!$token) {
-                error_log("ERROR: No se proporcionó token");
                 self::enviarEventoSSE('error', ['message' => 'Token no proporcionado']);
                 exit();
             }
 
-            // Verificar token manualmente usando la función global validateToken
             $user = validateToken($token);
-
             if (!$user) {
-                error_log("ERROR: Token inválido");
                 self::enviarEventoSSE('error', ['message' => 'Token inválido']);
                 exit();
             }
 
-            error_log("Token válido, usuario ID: " . $user['id']);
-            error_log("Usuario: " . $user['nombre']);
-
-            // La función validateToken ya devuelve la información del usuario
             Flight::set('currentUser', $user);
             $currentUser = $user;
 
-            // Obtener datos de GET
+            // Obtener datos
             $contrato_id = $_GET['contrato_id'] ?? null;
             $pregunta = urldecode($_GET['pregunta'] ?? '');
             $continuar_sesion = $_GET['continuar_sesion'] === 'true';
             $sesion_id = $_GET['sesion_id'] ?? null;
+            $proveedor = $_GET['proveedor'] ?? null; // NUEVO
 
-            error_log("Parámetros recibidos:");
-            error_log("- contrato_id: " . $contrato_id);
-            error_log("- pregunta: " . $pregunta);
-            error_log("- continuar_sesion: " . ($continuar_sesion ? 'true' : 'false'));
-            error_log("- sesion_id: " . $sesion_id);
+            error_log("Proveedor solicitado: " . $proveedor);
 
             if (!$contrato_id || !$pregunta) {
-                error_log("ERROR: Datos faltantes - contrato_id o pregunta");
                 self::enviarEventoSSE('error', ['message' => 'Contrato y pregunta son requeridos']);
                 exit();
             }
 
             // Verificar acceso al contrato
             if (!self::verificarAccesoContrato($currentUser['id'], $contrato_id)) {
-                error_log("ERROR: Usuario sin acceso al contrato");
                 self::enviarEventoSSE('error', ['message' => 'No tiene acceso a este contrato']);
                 exit();
             }
 
-            error_log("Acceso al contrato verificado");
-
             // Crear o recuperar sesión
-            if ($continuar_sesion && $sesion_id && $sesion_id !== 'null' && $sesion_id !== '') {
+            if ($continuar_sesion && $sesion_id && $sesion_id !== 'null') {
                 $sesion = self::obtenerSesion($sesion_id, $currentUser['id']);
                 if (!$sesion || $sesion['contrato_id'] != $contrato_id) {
                     $sesion_id = self::crearNuevaSesion($currentUser['id'], $contrato_id, $pregunta);
-                    error_log("Sesión anterior no válida, creada nueva: " . $sesion_id);
-                } else {
-                    error_log("Continuando sesión existente: " . $sesion_id);
                 }
             } else {
                 $sesion_id = self::crearNuevaSesion($currentUser['id'], $contrato_id, $pregunta);
-                error_log("Nueva sesión creada: " . $sesion_id);
             }
 
             // Enviar ID de sesión
@@ -187,14 +163,12 @@ class ChatService
 
             // Obtener historial
             $historial = self::obtenerHistorial($sesion_id);
-            error_log("Mensajes en historial: " . count($historial));
 
             // Realizar búsqueda semántica
             self::enviarEventoSSE('status', ['message' => 'Buscando información relevante...']);
 
             require_once __DIR__ . '/embeddings.service.php';
             $resultadosBusqueda = EmbeddingsService::busquedaSemantica($pregunta, $contrato_id);
-            error_log("Resultados de búsqueda: " . $resultadosBusqueda['total_resultados'] . " elementos");
 
             // Construir contexto
             $contexto = self::construirContextoCompleto($contrato_id, $resultadosBusqueda);
@@ -212,27 +186,38 @@ class ChatService
                 ]);
             }
 
-            // Consultar a GPT-4 con streaming
+            // Generar respuesta con IA
             self::enviarEventoSSE('status', ['message' => 'Generando respuesta...']);
-            error_log("Iniciando consulta a GPT-4...");
 
-            self::consultarIAStreaming($messages, $sesion_id);
+            // Pasar el proveedor al método que genera la respuesta
+            self::generarRespuestaConStreaming($messages, $sesion_id, $contrato_id, $proveedor);
 
             // Actualizar estadísticas
             self::actualizarEstadisticasSesion($sesion_id);
 
             // Enviar evento de finalización
             self::enviarEventoSSE('done', ['success' => true]);
-
-            error_log("=== FIN ChatService::iniciarConversacionStream ===");
         } catch (Exception $e) {
-            error_log("ERROR CRÍTICO en chat streaming: " . $e->getMessage());
-            error_log("Stack trace: " . $e->getTraceAsString());
-            self::enviarEventoSSE('error', ['message' => 'Error al procesar conversación: ' . $e->getMessage()]);
+            error_log("ERROR en chat streaming: " . $e->getMessage());
+            self::enviarEventoSSE('error', ['message' => 'Error al procesar conversación']);
         } finally {
-            // Cerrar conexión
             exit();
         }
+    }
+
+    /**
+     * Generar respuesta con streaming usando proveedor específico
+     */
+    private static function generarRespuestaConStreaming($messages, $sesionId, $contratoId, $proveedor = null)
+    {
+        // Si se especificó un proveedor, usarlo
+        if ($proveedor) {
+            error_log("Intentando usar proveedor específico: " . $proveedor);
+            // TODO: Aquí llamar al provider manager con el proveedor específico
+        }
+
+        // Por ahora, usar el método existente
+        self::consultarIAStreaming($messages, $sesionId);
     }
 
     /**

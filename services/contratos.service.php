@@ -163,6 +163,23 @@ class ContratosService
             $stmtObligaciones->execute();
             $contrato['obligaciones'] = $stmtObligaciones->fetchAll(PDO::FETCH_ASSOC);
 
+
+            // Obtener proyectos
+            $stmtProyectos = $db->prepare("
+                SELECT 
+                    id,
+                    numero_proyecto,
+                    titulo,
+                    descripcion,
+                    activo
+                FROM proyectos_contractuales
+                WHERE contrato_id = :contrato_id
+                ORDER BY numero_proyecto ASC
+            ");
+            $stmtProyectos->bindParam(':contrato_id', $id);
+            $stmtProyectos->execute();
+            $contrato['proyectos'] = $stmtProyectos->fetchAll(PDO::FETCH_ASSOC);
+
             // Obtener valores mensuales
             $stmtValores = $db->prepare("
                 SELECT 
@@ -211,6 +228,7 @@ class ContratosService
             $objeto_contrato = $data['objeto_contrato'] ?? null;
             $valor_total = $data['valor_total'] ?? null;
             $embeddings_modelo_id = $data['embeddings_modelo_id'] ?? null;
+
             if (
                 !$numero_contrato || !$contratista_id || !$entidad_id ||
                 !$fecha_suscripcion || !$fecha_inicio || !$fecha_terminacion ||
@@ -247,36 +265,36 @@ class ContratosService
 
                 // Insertar contrato
                 $sentence = $db->prepare("
-                    INSERT INTO contratos (
-                        numero_contrato,
-                        contratista_id,
-                        entidad_id,
-                        fecha_suscripcion,
-                        fecha_inicio,
-                        fecha_terminacion,
-                        plazo_dias,
-                        objeto_contrato,
-                        valor_total,
-                        dependencia,
-                        unidad_operativa,
-                        embeddings_modelo_id,
-                        estado
-                    ) VALUES (
-                        :numero_contrato,
-                        :contratista_id,
-                        :entidad_id,
-                        :fecha_suscripcion,
-                        :fecha_inicio,
-                        :fecha_terminacion,
-                        :plazo_dias,
-                        :objeto_contrato,
-                        :valor_total,
-                        :dependencia,
-                        :unidad_operativa,
-                        :embeddings_modelo_id,
-                        :estado
-                    )
-                ");
+                INSERT INTO contratos (
+                    numero_contrato,
+                    contratista_id,
+                    entidad_id,
+                    fecha_suscripcion,
+                    fecha_inicio,
+                    fecha_terminacion,
+                    plazo_dias,
+                    objeto_contrato,
+                    valor_total,
+                    dependencia,
+                    unidad_operativa,
+                    embeddings_modelo_id,
+                    estado
+                ) VALUES (
+                    :numero_contrato,
+                    :contratista_id,
+                    :entidad_id,
+                    :fecha_suscripcion,
+                    :fecha_inicio,
+                    :fecha_terminacion,
+                    :plazo_dias,
+                    :objeto_contrato,
+                    :valor_total,
+                    :dependencia,
+                    :unidad_operativa,
+                    :embeddings_modelo_id,
+                    :estado
+                )
+            ");
 
                 $sentence->bindParam(':numero_contrato', $numero_contrato);
                 $sentence->bindParam(':contratista_id', $contratista_id);
@@ -298,20 +316,20 @@ class ContratosService
                 if (!empty($data['supervisores'])) {
                     foreach ($data['supervisores'] as $supervisor) {
                         $stmtSupervisor = $db->prepare("
-                            INSERT INTO contratos_supervisores (
-                                contrato_id,
-                                nombre,
-                                cargo,
-                                tipo,
-                                fecha_asignacion
-                            ) VALUES (
-                                :contrato_id,
-                                :nombre,
-                                :cargo,
-                                :tipo,
-                                :fecha_asignacion
-                            )
-                        ");
+                        INSERT INTO contratos_supervisores (
+                            contrato_id,
+                            nombre,
+                            cargo,
+                            tipo,
+                            fecha_asignacion
+                        ) VALUES (
+                            :contrato_id,
+                            :nombre,
+                            :cargo,
+                            :tipo,
+                            :fecha_asignacion
+                        )
+                    ");
 
                         $cargo = $supervisor['cargo'] ?? null;
                         $tipo = $supervisor['tipo'] ?? 'principal';
@@ -329,16 +347,16 @@ class ContratosService
                 if (!empty($data['obligaciones'])) {
                     foreach ($data['obligaciones'] as $index => $obligacion) {
                         $stmtObligacion = $db->prepare("
-                            INSERT INTO obligaciones_contractuales (
-                                contrato_id,
-                                numero_obligacion,
-                                descripcion
-                            ) VALUES (
-                                :contrato_id,
-                                :numero_obligacion,
-                                :descripcion
-                            )
-                        ");
+                        INSERT INTO obligaciones_contractuales (
+                            contrato_id,
+                            numero_obligacion,
+                            descripcion
+                        ) VALUES (
+                            :contrato_id,
+                            :numero_obligacion,
+                            :descripcion
+                        )
+                    ");
 
                         $numero = $obligacion['numero_obligacion'] ?? ($index + 1);
                         $stmtObligacion->bindParam(':contrato_id', $contratoId);
@@ -348,26 +366,52 @@ class ContratosService
                     }
                 }
 
+                // Insertar proyectos si se proporcionaron
+                if (!empty($data['proyectos'])) {
+                    foreach ($data['proyectos'] as $index => $proyecto) {
+                        $stmtProyecto = $db->prepare("
+                        INSERT INTO proyectos_contractuales (
+                            contrato_id,
+                            numero_proyecto,
+                            titulo,
+                            descripcion
+                        ) VALUES (
+                            :contrato_id,
+                            :numero_proyecto,
+                            :titulo,
+                            :descripcion
+                        )
+                    ");
+
+                        $numero = $proyecto['numero_proyecto'] ?? ($index + 1);
+                        $stmtProyecto->bindParam(':contrato_id', $contratoId);
+                        $stmtProyecto->bindParam(':numero_proyecto', $numero);
+                        $stmtProyecto->bindParam(':titulo', $proyecto['titulo']);
+                        $stmtProyecto->bindParam(':descripcion', $proyecto['descripcion']);
+                        $stmtProyecto->execute();
+                    }
+                }
+
                 // Insertar valores mensuales si se proporcionaron
                 if (!empty($data['valores_mensuales'])) {
                     foreach ($data['valores_mensuales'] as $valorMensual) {
                         $stmtValor = $db->prepare("
-                            INSERT INTO valores_mensuales (
-                                contrato_id,
-                                mes,
-                                anio,
-                                valor,
-                                porcentaje_avance_fisico,
-                                porcentaje_avance_financiero
-                            ) VALUES (
-                                :contrato_id,
-                                :mes,
-                                :anio,
-                                :valor,
-                                :porcentaje_avance_fisico,
-                                :porcentaje_avance_financiero
-                            )
-                        ");
+                        INSERT INTO valores_mensuales (
+                            contrato_id,
+                            mes,
+                            anio,
+                            valor,
+                            porcentaje_avance_fisico,
+                            porcentaje_avance_financiero
+                        ) VALUES (
+                            :contrato_id,
+                            :mes,
+                            :anio,
+                            :valor,
+                            :porcentaje_avance_fisico,
+                            :porcentaje_avance_financiero
+                        )
+                    ");
 
                         $porcentaje_fisico = $valorMensual['porcentaje_avance_fisico'] ?? null;
                         $porcentaje_financiero = $valorMensual['porcentaje_avance_financiero'] ?? null;
@@ -397,7 +441,9 @@ class ContratosService
                     'objeto_contrato' => $objeto_contrato,
                     'valor_total' => $valor_total,
                     'supervisores' => count($data['supervisores'] ?? []),
-                    'obligaciones' => count($data['obligaciones'] ?? [])
+                    'obligaciones' => count($data['obligaciones'] ?? []),
+                    'proyectos' => count($data['proyectos'] ?? []),
+                    'valores_mensuales' => count($data['valores_mensuales'] ?? [])
                 ];
 
                 AuditService::registrar('contratos', $contratoId, 'CREATE', null, $datosNuevos);
@@ -453,7 +499,7 @@ class ContratosService
             $db->beginTransaction();
 
             try {
-                // Construir query dinámicamente
+                // Construir query dinámicamente para datos básicos
                 $updates = [];
                 $params = [':id' => $id];
 
@@ -461,10 +507,10 @@ class ContratosService
                     // Verificar que no exista otro contrato con el mismo número
                     if ($data['numero_contrato'] !== $datosAnteriores['numero_contrato']) {
                         $checkSentence = $db->prepare("
-                            SELECT id FROM contratos 
-                            WHERE numero_contrato = :numero_contrato 
-                            AND id != :id
-                        ");
+                        SELECT id FROM contratos 
+                        WHERE numero_contrato = :numero_contrato 
+                        AND id != :id
+                    ");
                         $checkSentence->bindParam(':numero_contrato', $data['numero_contrato']);
                         $checkSentence->bindParam(':id', $id);
                         $checkSentence->execute();
@@ -502,12 +548,16 @@ class ContratosService
                     $updates[] = "plazo_dias = :plazo_dias";
                     $params[':plazo_dias'] = $plazo_dias;
                 }
+
                 if (isset($data['embeddings_modelo_id'])) {
                     $updates[] = "embeddings_modelo_id = :embeddings_modelo_id";
                     $params[':embeddings_modelo_id'] = $data['embeddings_modelo_id'];
                 }
-                // Otros campos
+
+                // Otros campos actualizables
                 $camposActualizables = [
+                    'contratista_id',
+                    'entidad_id',
                     'fecha_suscripcion',
                     'objeto_contrato',
                     'valor_total',
@@ -534,6 +584,264 @@ class ContratosService
                     $sentence->execute();
                 }
 
+                // Gestionar supervisores
+                if (isset($data['supervisores'])) {
+                    // Desactivar actuales
+                    $stmtDesactivar = $db->prepare("
+                    UPDATE contratos_supervisores 
+                    SET activo = 0 
+                    WHERE contrato_id = :contrato_id
+                ");
+                    $stmtDesactivar->bindParam(':contrato_id', $id);
+                    $stmtDesactivar->execute();
+
+                    // Insertar/actualizar nuevos
+                    foreach ($data['supervisores'] as $supervisor) {
+                        if (isset($supervisor['id']) && $supervisor['id']) {
+                            $stmtUpdate = $db->prepare("
+                            UPDATE contratos_supervisores 
+                            SET nombre = :nombre,
+                                cargo = :cargo,
+                                tipo = :tipo,
+                                activo = 1
+                            WHERE id = :id AND contrato_id = :contrato_id
+                        ");
+
+                            $cargo = $supervisor['cargo'] ?? null;
+                            $tipo = $supervisor['tipo'] ?? 'principal';
+
+                            $stmtUpdate->bindParam(':id', $supervisor['id']);
+                            $stmtUpdate->bindParam(':contrato_id', $id);
+                            $stmtUpdate->bindParam(':nombre', $supervisor['nombre']);
+                            $stmtUpdate->bindParam(':cargo', $cargo);
+                            $stmtUpdate->bindParam(':tipo', $tipo);
+                            $stmtUpdate->execute();
+                        } else {
+                            $stmtInsert = $db->prepare("
+                            INSERT INTO contratos_supervisores (
+                                contrato_id,
+                                nombre,
+                                cargo,
+                                tipo,
+                                fecha_asignacion,
+                                activo
+                            ) VALUES (
+                                :contrato_id,
+                                :nombre,
+                                :cargo,
+                                :tipo,
+                                CURDATE(),
+                                1
+                            )
+                        ");
+
+                            $cargo = $supervisor['cargo'] ?? null;
+                            $tipo = $supervisor['tipo'] ?? 'principal';
+
+                            $stmtInsert->bindParam(':contrato_id', $id);
+                            $stmtInsert->bindParam(':nombre', $supervisor['nombre']);
+                            $stmtInsert->bindParam(':cargo', $cargo);
+                            $stmtInsert->bindParam(':tipo', $tipo);
+                            $stmtInsert->execute();
+                        }
+                    }
+                }
+
+                // Gestionar obligaciones
+                if (isset($data['obligaciones'])) {
+                    $stmtDesactivar = $db->prepare("
+                    UPDATE obligaciones_contractuales 
+                    SET activo = 0 
+                    WHERE contrato_id = :contrato_id
+                ");
+                    $stmtDesactivar->bindParam(':contrato_id', $id);
+                    $stmtDesactivar->execute();
+
+                    foreach ($data['obligaciones'] as $obligacion) {
+                        if (isset($obligacion['id']) && $obligacion['id']) {
+                            $stmtUpdate = $db->prepare("
+                            UPDATE obligaciones_contractuales 
+                            SET numero_obligacion = :numero_obligacion,
+                                descripcion = :descripcion,
+                                activo = 1
+                            WHERE id = :id AND contrato_id = :contrato_id
+                        ");
+
+                            $stmtUpdate->bindParam(':id', $obligacion['id']);
+                            $stmtUpdate->bindParam(':contrato_id', $id);
+                            $stmtUpdate->bindParam(':numero_obligacion', $obligacion['numero_obligacion']);
+                            $stmtUpdate->bindParam(':descripcion', $obligacion['descripcion']);
+                            $stmtUpdate->execute();
+                        } else {
+                            $stmtInsert = $db->prepare("
+                            INSERT INTO obligaciones_contractuales (
+                                contrato_id,
+                                numero_obligacion,
+                                descripcion,
+                                activo
+                            ) VALUES (
+                                :contrato_id,
+                                :numero_obligacion,
+                                :descripcion,
+                                1
+                            )
+                        ");
+
+                            $stmtInsert->bindParam(':contrato_id', $id);
+                            $stmtInsert->bindParam(':numero_obligacion', $obligacion['numero_obligacion']);
+                            $stmtInsert->bindParam(':descripcion', $obligacion['descripcion']);
+                            $stmtInsert->execute();
+                        }
+                    }
+                }
+
+                // Gestionar proyectos
+                if (isset($data['proyectos'])) {
+                    $stmtDesactivar = $db->prepare("
+                    UPDATE proyectos_contractuales 
+                    SET activo = 0 
+                    WHERE contrato_id = :contrato_id
+                ");
+                    $stmtDesactivar->bindParam(':contrato_id', $id);
+                    $stmtDesactivar->execute();
+
+                    foreach ($data['proyectos'] as $proyecto) {
+                        if (isset($proyecto['id']) && $proyecto['id']) {
+                            $stmtUpdate = $db->prepare("
+                            UPDATE proyectos_contractuales 
+                            SET numero_proyecto = :numero_proyecto,
+                                titulo = :titulo,
+                                descripcion = :descripcion,
+                                activo = 1
+                            WHERE id = :id AND contrato_id = :contrato_id
+                        ");
+
+                            $stmtUpdate->bindParam(':id', $proyecto['id']);
+                            $stmtUpdate->bindParam(':contrato_id', $id);
+                            $stmtUpdate->bindParam(':numero_proyecto', $proyecto['numero_proyecto']);
+                            $stmtUpdate->bindParam(':titulo', $proyecto['titulo']);
+                            $stmtUpdate->bindParam(':descripcion', $proyecto['descripcion']);
+                            $stmtUpdate->execute();
+                        } else {
+                            $stmtInsert = $db->prepare("
+                            INSERT INTO proyectos_contractuales (
+                                contrato_id,
+                                numero_proyecto,
+                                titulo,
+                                descripcion,
+                                activo
+                            ) VALUES (
+                                :contrato_id,
+                                :numero_proyecto,
+                                :titulo,
+                                :descripcion,
+                                1
+                            )
+                        ");
+
+                            $stmtInsert->bindParam(':contrato_id', $id);
+                            $stmtInsert->bindParam(':numero_proyecto', $proyecto['numero_proyecto']);
+                            $stmtInsert->bindParam(':titulo', $proyecto['titulo']);
+                            $stmtInsert->bindParam(':descripcion', $proyecto['descripcion']);
+                            $stmtInsert->execute();
+                        }
+                    }
+                }
+
+                // Gestionar valores mensuales
+                if (isset($data['valores_mensuales'])) {
+                    foreach ($data['valores_mensuales'] as $valor) {
+                        if (isset($valor['id']) && $valor['id']) {
+                            // Si tiene ID, actualizar
+                            $stmtUpdate = $db->prepare("
+                            UPDATE valores_mensuales 
+                            SET mes = :mes,
+                                anio = :anio,
+                                valor = :valor,
+                                porcentaje_avance_fisico = :porcentaje_avance_fisico,
+                                porcentaje_avance_financiero = :porcentaje_avance_financiero
+                            WHERE id = :id AND contrato_id = :contrato_id
+                        ");
+
+                            $porcentaje_fisico = $valor['porcentaje_avance_fisico'] ?? null;
+                            $porcentaje_financiero = $valor['porcentaje_avance_financiero'] ?? null;
+
+                            $stmtUpdate->bindParam(':id', $valor['id']);
+                            $stmtUpdate->bindParam(':contrato_id', $id);
+                            $stmtUpdate->bindParam(':mes', $valor['mes']);
+                            $stmtUpdate->bindParam(':anio', $valor['anio']);
+                            $stmtUpdate->bindParam(':valor', $valor['valor']);
+                            $stmtUpdate->bindParam(':porcentaje_avance_fisico', $porcentaje_fisico);
+                            $stmtUpdate->bindParam(':porcentaje_avance_financiero', $porcentaje_financiero);
+                            $stmtUpdate->execute();
+                        } else {
+                            // Si no tiene ID, verificar si existe por mes/año
+                            $checkExiste = $db->prepare("
+                            SELECT id FROM valores_mensuales 
+                            WHERE contrato_id = :contrato_id 
+                            AND mes = :mes 
+                            AND anio = :anio
+                        ");
+                            $checkExiste->bindParam(':contrato_id', $id);
+                            $checkExiste->bindParam(':mes', $valor['mes']);
+                            $checkExiste->bindParam(':anio', $valor['anio']);
+                            $checkExiste->execute();
+
+                            $existe = $checkExiste->fetch();
+
+                            if ($existe) {
+                                // Actualizar existente
+                                $stmtUpdate = $db->prepare("
+                                UPDATE valores_mensuales 
+                                SET valor = :valor,
+                                    porcentaje_avance_fisico = :porcentaje_avance_fisico,
+                                    porcentaje_avance_financiero = :porcentaje_avance_financiero
+                                WHERE id = :id
+                            ");
+
+                                $porcentaje_fisico = $valor['porcentaje_avance_fisico'] ?? null;
+                                $porcentaje_financiero = $valor['porcentaje_avance_financiero'] ?? null;
+
+                                $stmtUpdate->bindParam(':id', $existe['id']);
+                                $stmtUpdate->bindParam(':valor', $valor['valor']);
+                                $stmtUpdate->bindParam(':porcentaje_avance_fisico', $porcentaje_fisico);
+                                $stmtUpdate->bindParam(':porcentaje_avance_financiero', $porcentaje_financiero);
+                                $stmtUpdate->execute();
+                            } else {
+                                // Insertar nuevo
+                                $stmtInsert = $db->prepare("
+                                INSERT INTO valores_mensuales (
+                                    contrato_id,
+                                    mes,
+                                    anio,
+                                    valor,
+                                    porcentaje_avance_fisico,
+                                    porcentaje_avance_financiero
+                                ) VALUES (
+                                    :contrato_id,
+                                    :mes,
+                                    :anio,
+                                    :valor,
+                                    :porcentaje_avance_fisico,
+                                    :porcentaje_avance_financiero
+                                )
+                            ");
+
+                                $porcentaje_fisico = $valor['porcentaje_avance_fisico'] ?? null;
+                                $porcentaje_financiero = $valor['porcentaje_avance_financiero'] ?? null;
+
+                                $stmtInsert->bindParam(':contrato_id', $id);
+                                $stmtInsert->bindParam(':mes', $valor['mes']);
+                                $stmtInsert->bindParam(':anio', $valor['anio']);
+                                $stmtInsert->bindParam(':valor', $valor['valor']);
+                                $stmtInsert->bindParam(':porcentaje_avance_fisico', $porcentaje_fisico);
+                                $stmtInsert->bindParam(':porcentaje_avance_financiero', $porcentaje_financiero);
+                                $stmtInsert->execute();
+                            }
+                        }
+                    }
+                }
+
                 $db->commit();
 
                 // Obtener datos nuevos para auditoría
@@ -555,7 +863,7 @@ class ContratosService
             }
         } catch (Exception $e) {
             error_log("ERROR en actualizar contrato: " . $e->getMessage());
-            responderJSON(['error' => 'Error al actualizar contrato'], 500);
+            responderJSON(['error' => 'Error al actualizar contrato: ' . $e->getMessage()], 500);
         }
     }
 
@@ -1177,6 +1485,120 @@ class ContratosService
         } catch (Exception $e) {
             error_log("Error al obtener contratos por contratista: " . $e->getMessage());
             Flight::json(['error' => 'Error al obtener contratos'], 500);
+        }
+    }
+    // Gestionar proyectos del contrato
+    public static function gestionarProyectos()
+    {
+        try {
+            requireAuth();
+            $currentUser = Flight::get('currentUser');
+
+            if (!AuthService::checkPermission($currentUser['id'], 'contratos.gestionar')) {
+                responderJSON(['error' => 'No tiene permisos para gestionar proyectos'], 403);
+                return;
+            }
+
+            $data = Flight::request()->data->getData();
+            $contrato_id = $data['contrato_id'] ?? null;
+            $proyectos = $data['proyectos'] ?? [];
+
+            if (!$contrato_id) {
+                responderJSON(['error' => 'ID de contrato no proporcionado'], 400);
+                return;
+            }
+
+            $db = Flight::db();
+
+            // Verificar que el contrato existe
+            $checkContrato = $db->prepare("SELECT id FROM contratos WHERE id = :id");
+            $checkContrato->bindParam(':id', $contrato_id);
+            $checkContrato->execute();
+
+            if (!$checkContrato->fetch()) {
+                responderJSON(['error' => 'Contrato no encontrado'], 404);
+                return;
+            }
+
+            $db->beginTransaction();
+
+            try {
+                // Desactivar proyectos actuales
+                $stmtDesactivar = $db->prepare("
+                UPDATE proyectos_contractuales 
+                SET activo = 0 
+                WHERE contrato_id = :contrato_id
+            ");
+                $stmtDesactivar->bindParam(':contrato_id', $contrato_id);
+                $stmtDesactivar->execute();
+
+                // Insertar o actualizar proyectos
+                foreach ($proyectos as $proyecto) {
+                    if (isset($proyecto['id']) && $proyecto['id']) {
+                        // Actualizar existente
+                        $stmtUpdate = $db->prepare("
+                        UPDATE proyectos_contractuales 
+                        SET numero_proyecto = :numero_proyecto,
+                            titulo = :titulo,
+                            descripcion = :descripcion,
+                            activo = 1
+                        WHERE id = :id AND contrato_id = :contrato_id
+                    ");
+
+                        $stmtUpdate->bindParam(':id', $proyecto['id']);
+                        $stmtUpdate->bindParam(':contrato_id', $contrato_id);
+                        $stmtUpdate->bindParam(':numero_proyecto', $proyecto['numero_proyecto']);
+                        $stmtUpdate->bindParam(':titulo', $proyecto['titulo']);
+                        $stmtUpdate->bindParam(':descripcion', $proyecto['descripcion']);
+                        $stmtUpdate->execute();
+                    } else {
+                        // Insertar nuevo
+                        $stmtInsert = $db->prepare("
+                        INSERT INTO proyectos_contractuales (
+                            contrato_id,
+                            numero_proyecto,
+                            titulo,
+                            descripcion,
+                            activo
+                        ) VALUES (
+                            :contrato_id,
+                            :numero_proyecto,
+                            :titulo,
+                            :descripcion,
+                            1
+                        )
+                    ");
+
+                        $stmtInsert->bindParam(':contrato_id', $contrato_id);
+                        $stmtInsert->bindParam(':numero_proyecto', $proyecto['numero_proyecto']);
+                        $stmtInsert->bindParam(':titulo', $proyecto['titulo']);
+                        $stmtInsert->bindParam(':descripcion', $proyecto['descripcion']);
+                        $stmtInsert->execute();
+                    }
+                }
+
+                $db->commit();
+
+                // AUDITORÍA
+                AuditService::registrar(
+                    'proyectos_contractuales',
+                    $contrato_id,
+                    'UPDATE',
+                    ['accion' => 'actualizar_proyectos'],
+                    ['proyectos_actualizados' => count($proyectos)]
+                );
+
+                responderJSON([
+                    'success' => true,
+                    'message' => 'Proyectos actualizados correctamente'
+                ]);
+            } catch (Exception $e) {
+                $db->rollBack();
+                throw $e;
+            }
+        } catch (Exception $e) {
+            error_log("ERROR en gestionar proyectos: " . $e->getMessage());
+            responderJSON(['error' => 'Error al gestionar proyectos'], 500);
         }
     }
 }

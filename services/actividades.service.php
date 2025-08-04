@@ -155,8 +155,10 @@ class ActividadesService
 
             require_once __DIR__ . '/actividades-obligaciones.service.php';
             require_once __DIR__ . '/actividades-archivos.service.php';
+            require_once __DIR__ . '/actividades-proyectos.service.php';
 
             $actividad['obligaciones'] = ActividadesObligacionesService::obtenerPorActividad($id);
+            $actividad['proyectos'] = ActividadesProyectosService::obtenerPorActividad($id);
             $actividad['archivos'] = ActividadesArchivosService::obtenerPorActividad($id);
 
             responderJSON([
@@ -275,7 +277,12 @@ class ActividadesService
                     require_once __DIR__ . '/actividades-archivos.service.php';
                     $archivosGuardados = ActividadesArchivosService::agregar($actividadId, $_FILES, $currentUser['id'], $db);
                 }
-
+                // Delegar asignación de proyectos
+                if (!empty($_POST['proyectos'])) {
+                    require_once __DIR__ . '/actividades-proyectos.service.php';
+                    $proyectos = json_decode($_POST['proyectos'], true);
+                    ActividadesProyectosService::asignar($actividadId, $proyectos, $db);
+                }
                 // Generar embeddings de la actividad
                 try {
                     error_log("=== INICIANDO GENERACIÓN DE EMBEDDINGS ===");
@@ -305,7 +312,25 @@ class ActividadesService
                             $textoCompleto .= "Obligación {$oblig['numero_obligacion']}: {$oblig['descripcion']}\n";
                         }
                     }
+                    // Agregar proyectos al texto completo:
+                    if (!empty($_POST['proyectos'])) {
+                        $proyectos = json_decode($_POST['proyectos'], true);
+                        if (!empty($proyectos)) {
+                            $textoCompleto .= "\n\n--- PROYECTOS ASOCIADOS ---\n";
 
+                            // Obtener descripción de los proyectos
+                            $placeholders = array_fill(0, count($proyectos), '?');
+                            $sqlProy = "SELECT numero_proyecto, titulo, descripcion 
+                    FROM proyectos_contractuales 
+                    WHERE id IN (" . implode(',', $placeholders) . ")";
+                            $stmtProy = $db->prepare($sqlProy);
+                            $stmtProy->execute($proyectos);
+
+                            while ($proy = $stmtProy->fetch()) {
+                                $textoCompleto .= "Proyecto {$proy['numero_proyecto']} - {$proy['titulo']}: {$proy['descripcion']}\n";
+                            }
+                        }
+                    }
                     error_log("Texto completo longitud: " . strlen($textoCompleto));
 
                     // CAMBIAR ESTA LÍNEA:

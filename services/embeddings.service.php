@@ -367,9 +367,13 @@ class EmbeddingsService
             // 5. Buscar archivos en TODO el contrato
             $archivosTodos = self::buscarArchivosTodos($embeddingPregunta, $contratoId, 15, 0.6);
 
-            // 6. NUEVO: Buscar obligaciones similares
+            // 6.Buscar obligaciones similares
             require_once __DIR__ . '/obligaciones.service.php';
             $obligacionesRelevantes = ObligacionesService::buscarPorSimilitud($embeddingPregunta, $contratoId, 10);
+
+            // Buscar proyectos similares
+            require_once __DIR__ . '/proyectos.service.php';
+            $proyectosRelevantes = ProyectosService::buscarPorSimilitud($embeddingPregunta, $contratoId, 10);
 
             // 7. Combinar y deduplicar archivos
             $archivosRelevantes = self::combinarArchivos($archivosDeActividades, $archivosTodos);
@@ -379,7 +383,8 @@ class EmbeddingsService
                 $actividadesRelevantes,
                 $archivosDeActividades,
                 $archivosTodos,
-                $obligacionesRelevantes
+                $obligacionesRelevantes,
+                $proyectosRelevantes
             );
 
             return [
@@ -389,6 +394,7 @@ class EmbeddingsService
                 'archivos_actividades' => $archivosDeActividades,
                 'archivos_directos' => $archivosTodos,
                 'obligaciones' => $obligacionesRelevantes,
+                'proyectos' => $proyectosRelevantes,
                 'contexto' => $contexto,
                 'total_resultados' => count($actividadesRelevantes) + count($archivosRelevantes) + count($obligacionesRelevantes)
             ];
@@ -430,7 +436,7 @@ class EmbeddingsService
     /**
      * Construir contexto mejorado para GPT-4 (NUEVO MÉTODO)
      */
-    private static function construirContextoMejorado($actividades, $archivosDeActividades, $archivosTodos, $obligaciones = [])
+    private static function construirContextoMejorado($actividades, $archivosDeActividades, $archivosTodos, $obligaciones = [], $proyectos = [])
     {
         $contexto = "CONTEXTO DE BÚSQUEDA:\n\n";
 
@@ -446,8 +452,19 @@ class EmbeddingsService
                 }
             }
         }
+        // Sección 2: Proyectos relevantes (AGREGAR ESTA SECCIÓN)
+        if (!empty($proyectos)) {
+            $contexto .= "=== PROYECTOS RELEVANTES ===\n\n";
 
-        // Sección 2: Actividades relevantes con sus archivos
+            foreach ($proyectos as $proyecto) {
+                if ($proyecto['similitud'] >= 0.5) { // Solo incluir si es relevante
+                    $contexto .= "--- Proyecto {$proyecto['numero_proyecto']} - {$proyecto['titulo']} ---\n";
+                    $contexto .= "Descripción: {$proyecto['descripcion']}\n";
+                    $contexto .= "Relevancia: " . round($proyecto['similitud'] * 100, 1) . "%\n\n";
+                }
+            }
+        }
+        // Sección 3: Actividades relevantes con sus archivos
         if (!empty($actividades)) {
             $contexto .= "=== ACTIVIDADES RELEVANTES ===\n\n";
 
@@ -483,7 +500,7 @@ class EmbeddingsService
             }
         }
 
-        // Sección 3: Archivos encontrados por búsqueda directa
+        // Sección 4: Archivos encontrados por búsqueda directa
         $archivosDirectosUnicos = [];
         $idsYaIncluidos = array_column($archivosDeActividades, 'id');
 
@@ -506,15 +523,18 @@ class EmbeddingsService
             }
         }
 
-        // Sección 4: Resumen
+        // Sección 5: Resumen
         $totalActividades = count($actividades);
         $totalArchivos = count($archivosDeActividades) + count($archivosDirectosUnicos);
         $totalObligaciones = count(array_filter($obligaciones, function ($o) {
             return $o['similitud'] >= 0.5;
         }));
-
+        $totalProyectos = count(array_filter($proyectos, function ($p) {
+            return $p['similitud'] >= 0.5;
+        }));
         $contexto .= "\n=== RESUMEN DE RESULTADOS ===\n";
         $contexto .= "- Obligaciones relevantes: {$totalObligaciones}\n";
+        $contexto .= "- Proyectos relevantes: {$totalProyectos}\n";
         $contexto .= "- Actividades relevantes encontradas: {$totalActividades}\n";
         $contexto .= "- Archivos relevantes totales: {$totalArchivos}\n";
         $contexto .= "  - Por actividades relevantes: " . count($archivosDeActividades) . "\n";
@@ -528,7 +548,7 @@ class EmbeddingsService
     private static function construirContexto($actividades, $archivos)
     {
         // Usar el nuevo método mejorado
-        return self::construirContextoMejorado($actividades, $archivos, []);
+        return self::construirContextoMejorado($actividades, $archivos, [], []);
     }
 
     /**
