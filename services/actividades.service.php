@@ -501,11 +501,11 @@ class ActividadesService
 
                         // Obtener obligaciones actuales de la actividad
                         $stmtObligActuales = $db->prepare("
-            SELECT oc.numero_obligacion, oc.descripcion
-            FROM actividades_obligaciones ao
-            INNER JOIN obligaciones_contractuales oc ON ao.obligacion_id = oc.id
-            WHERE ao.actividad_id = :actividad_id
-        ");
+                            SELECT oc.numero_obligacion, oc.descripcion
+                            FROM actividades_obligaciones ao
+                            INNER JOIN obligaciones_contractuales oc ON ao.obligacion_id = oc.id
+                            WHERE ao.actividad_id = :actividad_id
+                        ");
                         $stmtObligActuales->bindParam(':actividad_id', $id);
                         $stmtObligActuales->execute();
 
@@ -531,16 +531,51 @@ class ActividadesService
 
                         // CAMBIAR ESTA CONSULTA - YA NO NECESITAMOS embeddings_modelo_id:
                         $stmtUpdate = $db->prepare("
-            UPDATE actividades 
-            SET embeddings = :embeddings,
-                procesado_ia = 1
-            WHERE id = :id
-        ");
+                            UPDATE actividades 
+                            SET embeddings = :embeddings,
+                                procesado_ia = 1
+                            WHERE id = :id
+                        ");
                         $stmtUpdate->bindParam(':embeddings', json_encode($embeddingResult['vector']));
                         $stmtUpdate->bindParam(':id', $id);
                         $stmtUpdate->execute();
                     } catch (Exception $e) {
                         error_log("Error regenerando embedding: " . $e->getMessage());
+                    }
+                }
+                // Actualizar archivos existentes modificados
+                if (isset($_POST['archivos_modificados'])) {
+                    $archivosModificados = json_decode($_POST['archivos_modificados'], true);
+
+                    if (is_array($archivosModificados)) {
+                        foreach ($archivosModificados as $archivoMod) {
+                            if (isset($archivoMod['id']) && isset($archivoMod['es_soporte'])) {
+                                // Verificar que el archivo pertenezca a esta actividad
+                                $stmtVerificar = $db->prepare("
+                    SELECT COUNT(*) as existe 
+                    FROM actividades_archivos 
+                    WHERE id = :archivo_id 
+                    AND actividad_id = :actividad_id
+                ");
+                                $stmtVerificar->bindParam(':archivo_id', $archivoMod['id']);
+                                $stmtVerificar->bindParam(':actividad_id', $id);
+                                $stmtVerificar->execute();
+                                $resultado = $stmtVerificar->fetch();
+
+                                if ($resultado['existe'] > 0) {
+                                    // Actualizar solo es_soporte
+                                    $stmtUpdate = $db->prepare("
+                        UPDATE actividades_archivos 
+                        SET es_soporte = :es_soporte 
+                        WHERE id = :archivo_id
+                    ");
+                                    $esSoporte = $archivoMod['es_soporte'] ? 1 : 0;
+                                    $stmtUpdate->bindParam(':es_soporte', $esSoporte, PDO::PARAM_INT);
+                                    $stmtUpdate->bindParam(':archivo_id', $archivoMod['id']);
+                                    $stmtUpdate->execute();
+                                }
+                            }
+                        }
                     }
                 }
                 $db->commit();

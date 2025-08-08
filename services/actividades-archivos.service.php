@@ -29,7 +29,26 @@ class ActividadesArchivosService
                                 'error' => $file['error'][$i],
                                 'size' => $file['size'][$i]
                             ];
-                            $resultado = self::procesarArchivoIndividual($actividadId, $singleFile, $usuarioId, $db, $storage);
+
+                            // Leer configuraciones del POST
+                            $configuracion = [
+                                'almacenar' => isset($_POST['archivos_almacenar'][$i]) ?
+                                    ($_POST['archivos_almacenar'][$i] === '1') : true,
+                                'extraer_texto' => isset($_POST['archivos_extraer_texto'][$i]) ?
+                                    ($_POST['archivos_extraer_texto'][$i] === '1') : true,
+                                'es_soporte' => isset($_POST['archivos_es_soporte'][$i]) ?
+                                    ($_POST['archivos_es_soporte'][$i] === '1') : true
+                            ];
+
+                            $resultado = self::procesarArchivoIndividual(
+                                $actividadId,
+                                $singleFile,
+                                $usuarioId,
+                                $db,
+                                $storage,
+                                $configuracion
+                            );
+
                             if ($resultado) {
                                 $archivosGuardados[] = $resultado;
                             }
@@ -38,7 +57,25 @@ class ActividadesArchivosService
                 } else {
                     // Archivo único
                     if ($file['error'] === UPLOAD_ERR_OK) {
-                        $resultado = self::procesarArchivoIndividual($actividadId, $file, $usuarioId, $db, $storage);
+                        // Para archivo único, usar índice 0
+                        $configuracion = [
+                            'almacenar' => isset($_POST['archivos_almacenar'][0]) ?
+                                ($_POST['archivos_almacenar'][0] === '1') : true,
+                            'extraer_texto' => isset($_POST['archivos_extraer_texto'][0]) ?
+                                ($_POST['archivos_extraer_texto'][0] === '1') : true,
+                            'es_soporte' => isset($_POST['archivos_es_soporte'][0]) ?
+                                ($_POST['archivos_es_soporte'][0] === '1') : true
+                        ];
+
+                        $resultado = self::procesarArchivoIndividual(
+                            $actividadId,
+                            $file,
+                            $usuarioId,
+                            $db,
+                            $storage,
+                            $configuracion
+                        );
+
                         if ($resultado) {
                             $archivosGuardados[] = $resultado;
                         }
@@ -71,24 +108,24 @@ class ActividadesArchivosService
 
 
     // Procesar un archivo individual
-    private static function procesarArchivoIndividual($actividadId, $file, $usuarioId, $db, $storage)
+    private static function procesarArchivoIndividual($actividadId, $file, $usuarioId, $db, $storage, $configuracion = [])
     {
         try {
             // Obtener información del contrato y contratista
             $stmtInfo = $db->prepare("
-                SELECT 
-                    c.id as contrato_id,
-                    c.numero_contrato,
-                    YEAR(c.fecha_inicio) as anio_contrato,
-                    ct.id as contratista_id,
-                    ct.nombre_completo,
-                    a.fecha_actividad,
-                    c.embeddings_modelo_id 
-                FROM actividades a
-                INNER JOIN contratos c ON a.contrato_id = c.id
-                INNER JOIN contratistas ct ON c.contratista_id = ct.id
-                WHERE a.id = :actividad_id
-            ");
+            SELECT 
+                c.id as contrato_id,
+                c.numero_contrato,
+                YEAR(c.fecha_inicio) as anio_contrato,
+                ct.id as contratista_id,
+                ct.nombre_completo,
+                a.fecha_actividad,
+                c.embeddings_modelo_id 
+            FROM actividades a
+            INNER JOIN contratos c ON a.contrato_id = c.id
+            INNER JOIN contratistas ct ON c.contratista_id = ct.id
+            WHERE a.id = :actividad_id
+        ");
             $stmtInfo->bindParam(':actividad_id', $actividadId);
             $stmtInfo->execute();
             $info = $stmtInfo->fetch();
@@ -97,74 +134,106 @@ class ActividadesArchivosService
                 throw new Exception("No se encontró información de la actividad");
             }
 
-            // Limpiar nombres para la ruta
-            $nombreContratistaLimpio = self::limpiarNombreParaRuta($info['nombre_completo']);
-            $numeroContratoLimpio = self::limpiarNombreParaRuta($info['numero_contrato']);
+            // Usar valores de configuración o valores por defecto
+            $almacenar_archivo = isset($configuracion['almacenar']) ? $configuracion['almacenar'] : true;
+            $extraer_texto = isset($configuracion['extraer_texto']) ? $configuracion['extraer_texto'] : true;
+            $es_soporte = isset($configuracion['es_soporte']) ? $configuracion['es_soporte'] : true;
 
-            // Crear estructura de carpetas
-            $carpetaContratista = $info['contratista_id'] . '_' . $nombreContratistaLimpio;
-            $carpetaContrato = $info['anio_contrato'] . '_' . $numeroContratoLimpio;
-            $anioActividad = date('Y', strtotime($info['fecha_actividad']));
-            $mesActividad = date('m', strtotime($info['fecha_actividad']));
+            // Inicializar variables
+            $archivoInfo = [];
+            $archivo_url = null;
+            $hash_archivo = null;
 
-            $rutaCompleta = sprintf(
-                'contratistas/%s/contratos/%s/actividades/%s/%s/act_%s',
-                $carpetaContratista,
-                $carpetaContrato,
-                $anioActividad,
-                $mesActividad,
-                $actividadId
-            );
+            // Solo guardar archivo físicamente si almacenar_archivo es true
+            if ($almacenar_archivo) {
+                // Limpiar nombres para la ruta
+                $nombreContratistaLimpio = self::limpiarNombreParaRuta($info['nombre_completo']);
+                $numeroContratoLimpio = self::limpiarNombreParaRuta($info['numero_contrato']);
 
-            error_log("Guardando archivo en: " . $rutaCompleta);
+                // Crear estructura de carpetas
+                $carpetaContratista = $info['contratista_id'] . '_' . $nombreContratistaLimpio;
+                $carpetaContrato = $info['anio_contrato'] . '_' . $numeroContratoLimpio;
+                $anioActividad = date('Y', strtotime($info['fecha_actividad']));
+                $mesActividad = date('m', strtotime($info['fecha_actividad']));
 
-            // Guardar archivo usando StorageManager
-            $archivoInfo = $storage->guardarArchivo($file, $rutaCompleta);
+                $rutaCompleta = sprintf(
+                    'contratistas/%s/contratos/%s/actividades/%s/%s/act_%s',
+                    $carpetaContratista,
+                    $carpetaContrato,
+                    $anioActividad,
+                    $mesActividad,
+                    $actividadId
+                );
+
+                error_log("Guardando archivo en: " . $rutaCompleta);
+
+                // Guardar archivo usando StorageManager
+                $archivoInfo = $storage->guardarArchivo($file, $rutaCompleta);
+                $archivo_url = $archivoInfo['path'];
+                $hash_archivo = $archivoInfo['hash'];
+            } else {
+                // Si no se almacena, solo guardamos la información básica
+                $archivoInfo = [
+                    'nombre_original' => $file['name'],
+                    'mime_type' => $file['type'],
+                    'size' => $file['size'],
+                    'extension' => strtolower(pathinfo($file['name'], PATHINFO_EXTENSION))
+                ];
+
+                // Generar un hash del contenido aunque no se guarde
+                $hash_archivo = md5_file($file['tmp_name']);
+            }
 
             // Determinar tipo_archivo_id basado en la extensión
             $tipo_archivo_id = self::determinarTipoArchivo($archivoInfo['extension']);
 
-            // Por defecto, almacenar archivo y extraer texto
-            $almacenar_archivo = true;
-            $extraer_texto = true;
-
-            // Insertar en la BD con los nuevos campos
+            // Insertar en la BD
             $sql = "INSERT INTO actividades_archivos (
-                actividad_id,
-                nombre_archivo,
-                archivo_url,
-                tipo_archivo_id,
-                mime_type,
-                tamanio_bytes,
-                hash_archivo,
-                almacenar_archivo,
-                extraer_texto,
-                estado_extraccion,
-                usuario_carga_id,
-                procesado,
-                texto_extraido
-            ) VALUES (
-                :actividad_id,
-                :nombre_archivo,
-                :archivo_url,
-                :tipo_archivo_id,
-                :mime_type,
-                :tamanio_bytes,
-                :hash_archivo,
-                :almacenar_archivo,
-                :extraer_texto,
-                'pendiente',
-                :usuario_carga_id,
-                0,
-                :texto_extraido
-            )";
+            actividad_id,
+            nombre_archivo,
+            archivo_url,
+            tipo_archivo_id,
+            mime_type,
+            tamanio_bytes,
+            hash_archivo,
+            almacenar_archivo,
+            extraer_texto,
+            es_soporte,
+            estado_extraccion,
+            usuario_carga_id,
+            procesado,
+            texto_extraido
+        ) VALUES (
+            :actividad_id,
+            :nombre_archivo,
+            :archivo_url,
+            :tipo_archivo_id,
+            :mime_type,
+            :tamanio_bytes,
+            :hash_archivo,
+            :almacenar_archivo,
+            :extraer_texto,
+            :es_soporte,
+            'pendiente',
+            :usuario_carga_id,
+            0,
+            :texto_extraido
+        )";
 
-            // Extraer texto inmediatamente si es posible
+            // Extraer texto si está configurado Y si el archivo fue almacenado o si se puede leer del tmp
             $textoExtraido = null;
-            if (ExtractorService::puedeExtraerTexto($archivoInfo['extension'])) {
+            if ($extraer_texto && ExtractorService::puedeExtraerTexto($archivoInfo['extension'])) {
                 try {
                     require_once __DIR__ . '/extractor.service.php';
-                    $archivoPath = __DIR__ . '/../uploads/' . $archivoInfo['path'];
+
+                    // Si el archivo fue almacenado, usar la ruta guardada
+                    if ($almacenar_archivo && isset($archivoInfo['path'])) {
+                        $archivoPath = __DIR__ . '/../uploads/' . $archivoInfo['path'];
+                    } else {
+                        // Si no fue almacenado, usar el archivo temporal
+                        $archivoPath = $file['tmp_name'];
+                    }
+
                     $textoExtraido = ExtractorService::extraerTexto($archivoPath, $archivoInfo['extension']);
                     error_log("Texto extraído exitosamente, longitud: " . ($textoExtraido ? strlen($textoExtraido) : 0));
                 } catch (Exception $e) {
@@ -176,13 +245,14 @@ class ActividadesArchivosService
             $stmt = $db->prepare($sql);
             $stmt->bindParam(':actividad_id', $actividadId);
             $stmt->bindParam(':nombre_archivo', $archivoInfo['nombre_original']);
-            $stmt->bindParam(':archivo_url', $archivoInfo['path']);
+            $stmt->bindParam(':archivo_url', $archivo_url);
             $stmt->bindParam(':tipo_archivo_id', $tipo_archivo_id);
             $stmt->bindParam(':mime_type', $archivoInfo['mime_type']);
             $stmt->bindParam(':tamanio_bytes', $archivoInfo['size']);
-            $stmt->bindParam(':hash_archivo', $archivoInfo['hash']);
+            $stmt->bindParam(':hash_archivo', $hash_archivo);
             $stmt->bindParam(':almacenar_archivo', $almacenar_archivo, PDO::PARAM_BOOL);
             $stmt->bindParam(':extraer_texto', $extraer_texto, PDO::PARAM_BOOL);
+            $stmt->bindParam(':es_soporte', $es_soporte, PDO::PARAM_BOOL);
             $stmt->bindParam(':usuario_carga_id', $usuarioId);
             $stmt->bindParam(':texto_extraido', $textoExtraido);
             $stmt->execute();
@@ -190,6 +260,9 @@ class ActividadesArchivosService
             $archivoInfo['id'] = $db->lastInsertId();
             $archivoInfo['tipo_archivo_id'] = $tipo_archivo_id;
             $archivoInfo['texto_extraido'] = $textoExtraido;
+            $archivoInfo['es_soporte'] = $es_soporte;
+            $archivoInfo['almacenar_archivo'] = $almacenar_archivo;
+            $archivoInfo['extraer_texto'] = $extraer_texto;
 
             // Intentar generar embeddings si hay texto extraído
             if (!empty($textoExtraido)) {
@@ -199,7 +272,6 @@ class ActividadesArchivosService
 
                     require_once __DIR__ . '/embeddings.service.php';
 
-                    // POR ESTAS:
                     $contrato_id = $info['contrato_id'];
                     error_log("Contrato ID: " . $contrato_id);
 
@@ -211,14 +283,14 @@ class ActividadesArchivosService
 
                     // Actualizar archivo con embedding
                     $stmtUpdate = $db->prepare("
-            UPDATE actividades_archivos 
-            SET embeddings = :embeddings,
-                modelo_extraccion_id = :modelo_id,
-                estado_extraccion = 'completado',
-                procesado = 1,
-                fecha_procesamiento = NOW()
-            WHERE id = :id
-        ");
+                    UPDATE actividades_archivos 
+                    SET embeddings = :embeddings,
+                        modelo_extraccion_id = :modelo_id,
+                        estado_extraccion = 'completado',
+                        procesado = 1,
+                        fecha_procesamiento = NOW()
+                    WHERE id = :id
+                ");
 
                     $embeddingJson = json_encode($embeddingResult['vector']);
                     $stmtUpdate->bindParam(':embeddings', $embeddingJson);
@@ -231,10 +303,7 @@ class ActividadesArchivosService
                 } catch (Exception $e) {
                     error_log("ERROR generando embedding archivo {$archivoInfo['id']}:");
                     error_log("- Mensaje: " . $e->getMessage());
-                    error_log("- Stack: " . $e->getTraceAsString());
                 }
-            } else {
-                error_log("Archivo {$archivoInfo['id']} sin texto extraído, queda pendiente");
             }
 
             return $archivoInfo;
